@@ -137,6 +137,114 @@ export default function LoginScreen({ onSuccess }: Props) {
     return { path, area, points, w, h };
   }, []);
 
+  const supportingContent = (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 540 }}>
+      {/* Feature list */}
+      <ul
+        className="list-stagger"
+        style={{
+          listStyle: "none",
+          margin: 0,
+          padding: 0,
+          display: "grid",
+          gridTemplateColumns: isWide ? "1fr 1fr" : "1fr",
+          gap: 12,
+        }}
+      >
+        {FEATURES.map(({ icon: Icon, title, body }, i) => (
+          <li
+            key={title}
+            className="lift"
+            style={{
+              ["--i" as string]: i,
+              display: "flex",
+              gap: 10,
+              alignItems: "flex-start",
+              padding: "12px 14px",
+              background: "var(--surface-1)",
+              border: "1px solid var(--border)",
+              borderRadius: 12,
+            } as React.CSSProperties}
+          >
+            <div
+              style={{
+                width: 32, height: 32, borderRadius: 8,
+                background: "var(--accent-soft)", color: "var(--accent)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                flexShrink: 0,
+              }}
+            >
+              <Icon size={15} />
+            </div>
+            <div>
+              <div style={{ color: "var(--text-1)", fontSize: 13, fontWeight: 600, marginBottom: 2 }}>
+                {title}
+              </div>
+              <div style={{ color: "var(--text-2)", fontSize: 12, lineHeight: 1.45 }}>
+                {body}
+              </div>
+            </div>
+          </li>
+        ))}
+      </ul>
+
+      {/* Mini animated chart preview */}
+      <div
+        className="lift"
+        style={{
+          background: "var(--surface-1)",
+          border: "1px solid var(--border)",
+          borderRadius: 14,
+          padding: 16,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 12 }}>
+          <div style={{ fontSize: 12, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>
+            Sneak peek · Monthly Trend
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-2)", whiteSpace: "nowrap" }}>
+            <span style={{ color: "var(--success)", fontWeight: 600 }}>+154%</span> over 12 months
+          </div>
+        </div>
+        <svg viewBox={`0 0 ${chartPath.w} ${chartPath.h}`} width="100%" height="auto" style={{ display: "block" }}>
+          <defs>
+            <linearGradient id="loginChartFill" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.36" />
+              <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          <path d={chartPath.area} fill="url(#loginChartFill)" />
+          <path
+            d={chartPath.path}
+            fill="none"
+            stroke="var(--accent)"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{
+              strokeDasharray: 720,
+              strokeDashoffset: 720,
+              animation: "drawLine 1.6s ease-out 0.3s forwards",
+            }}
+          />
+          {chartPath.points.map(([x, y], i) => (
+            <circle
+              key={i}
+              cx={x}
+              cy={y}
+              r={2.5}
+              fill="var(--accent)"
+              style={{
+                opacity: 0,
+                animation: `popIn 0.45s ease ${0.4 + i * 0.06}s forwards`,
+              }}
+            />
+          ))}
+        </svg>
+      </div>
+    </div>
+  );
+
   return (
     <div
       className="login-page"
@@ -161,15 +269,15 @@ export default function LoginScreen({ onSuccess }: Props) {
           zIndex: 1,
           maxWidth: 1080,
           margin: "0 auto",
-          minHeight: "calc(100vh - 48px)",
+          minHeight: isWide ? "calc(100vh - 48px)" : "auto",
           display: "grid",
           gridTemplateColumns: isWide ? "1.05fr 1fr" : "1fr",
-          gap: isWide ? 56 : 32,
+          gap: isWide ? 56 : 20,
           alignItems: "center",
         }}
       >
         {/* Hero column */}
-        <div className="slide-up" style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+        <div className="slide-up" style={{ display: "flex", flexDirection: "column", gap: isWide ? 24 : 16 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <div
               className="pulse-accent"
@@ -197,7 +305,7 @@ export default function LoginScreen({ onSuccess }: Props) {
             <h1
               style={{
                 margin: 0,
-                fontSize: isWide ? 40 : 32,
+                fontSize: isWide ? 40 : 30,
                 fontWeight: 800,
                 lineHeight: 1.1,
                 letterSpacing: -0.6,
@@ -232,7 +340,7 @@ export default function LoginScreen({ onSuccess }: Props) {
                 color: "var(--text-2)",
                 fontSize: 15,
                 lineHeight: 1.55,
-                marginTop: 14,
+                margin: isWide ? "14px 0 0" : "12px 0 0",
                 maxWidth: 520,
               }}
             >
@@ -242,111 +350,7 @@ export default function LoginScreen({ onSuccess }: Props) {
             </p>
           </div>
 
-          {/* Feature list */}
-          <ul
-            className="list-stagger"
-            style={{
-              listStyle: "none",
-              margin: 0,
-              padding: 0,
-              display: "grid",
-              gridTemplateColumns: isWide ? "1fr 1fr" : "1fr",
-              gap: 12,
-              maxWidth: 540,
-            }}
-          >
-            {FEATURES.map(({ icon: Icon, title, body }, i) => (
-              <li
-                key={title}
-                className="lift"
-                style={{
-                  ["--i" as string]: i,
-                  display: "flex",
-                  gap: 10,
-                  alignItems: "flex-start",
-                  padding: "12px 14px",
-                  background: "var(--surface-1)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 12,
-                } as React.CSSProperties}
-              >
-                <div
-                  style={{
-                    width: 32, height: 32, borderRadius: 8,
-                    background: "var(--accent-soft)", color: "var(--accent)",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    flexShrink: 0,
-                  }}
-                >
-                  <Icon size={15} />
-                </div>
-                <div>
-                  <div style={{ color: "var(--text-1)", fontSize: 13, fontWeight: 600, marginBottom: 2 }}>
-                    {title}
-                  </div>
-                  <div style={{ color: "var(--text-2)", fontSize: 12, lineHeight: 1.45 }}>
-                    {body}
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ul>
-
-          {/* Mini animated chart preview */}
-          <div
-            className="lift"
-            style={{
-              background: "var(--surface-1)",
-              border: "1px solid var(--border)",
-              borderRadius: 14,
-              padding: 16,
-              maxWidth: 520,
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-              <div style={{ fontSize: 12, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>
-                Sneak peek · Monthly Trend
-              </div>
-              <div style={{ fontSize: 11, color: "var(--text-2)" }}>
-                <span style={{ color: "var(--success)", fontWeight: 600 }}>+154%</span> over 12 months
-              </div>
-            </div>
-            <svg viewBox={`0 0 ${chartPath.w} ${chartPath.h}`} width="100%" height="auto" style={{ display: "block" }}>
-              <defs>
-                <linearGradient id="loginChartFill" x1="0" x2="0" y1="0" y2="1">
-                  <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.36" />
-                  <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
-                </linearGradient>
-              </defs>
-              <path d={chartPath.area} fill="url(#loginChartFill)" />
-              <path
-                d={chartPath.path}
-                fill="none"
-                stroke="var(--accent)"
-                strokeWidth={2}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                style={{
-                  strokeDasharray: 720,
-                  strokeDashoffset: 720,
-                  animation: "drawLine 1.6s ease-out 0.3s forwards",
-                }}
-              />
-              {chartPath.points.map(([x, y], i) => (
-                <circle
-                  key={i}
-                  cx={x}
-                  cy={y}
-                  r={2.5}
-                  fill="var(--accent)"
-                  style={{
-                    opacity: 0,
-                    animation: `popIn 0.45s ease ${0.4 + i * 0.06}s forwards`,
-                  }}
-                />
-              ))}
-            </svg>
-          </div>
+          {isWide && supportingContent}
         </div>
 
         {/* Sign-in column */}
@@ -432,6 +436,12 @@ export default function LoginScreen({ onSuccess }: Props) {
             and at least one of these jokes will land.
           </div>
         </div>
+
+        {!isWide && (
+          <div className="slide-up" style={{ animationDelay: "180ms" }}>
+            {supportingContent}
+          </div>
+        )}
       </div>
 
       {/* Page-local keyframes for the orbs and chart line. Theme transitions
