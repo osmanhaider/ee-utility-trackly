@@ -167,6 +167,11 @@ export default function App() {
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--text-1)" }}>
       <header
+        className="safe-top"
+        // The class adds env(safe-area-inset-top) padding so the bar
+        // clears the notch / Dynamic Island in standalone-PWA mode.
+        // The CSS var lets us layer the mobile/desktop top-padding on
+        // top of the safe-area inset without losing it.
         style={{
           position: "sticky",
           top: 0,
@@ -175,7 +180,8 @@ export default function App() {
           backdropFilter: "saturate(140%) blur(10px)",
           WebkitBackdropFilter: "saturate(140%) blur(10px)",
           borderBottom: "1px solid var(--border)",
-          padding: isMobile ? "8px 10px" : "14px 24px",
+          padding: isMobile ? "0 10px 8px" : "0 24px 14px",
+          ["--safe-top-extra" as string]: isMobile ? "8px" : "14px",
           display: "flex",
           alignItems: "center",
           gap: isMobile ? 6 : 16,

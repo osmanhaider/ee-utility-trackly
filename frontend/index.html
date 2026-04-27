@@ -2,9 +2,32 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>EE Utility Tracker</title>
+    <meta
+      name="description"
+      content="Upload, parse and analyse Estonian utility bills with shared community insights."
+    />
+
+    <!-- Browser chrome / installable web app -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- Matches --bg in dark mode and --bg-elev (#fff) close enough in light mode;
+         iOS uses theme-color for the standalone status bar background when the
+         apple-mobile-web-app-status-bar-style is "default". -->
+    <meta name="theme-color" content="#10141f" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#fbf9f5" media="(prefers-color-scheme: light)" />
+
+    <!-- iOS standalone PWA: lets "Add to Home Screen" launch in its own window
+         without Safari's URL bar / nav, with a themed status bar overlay. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Utilities" />
+    <!-- "default" lets iOS pick a contrasting status-bar foreground based
+         on the matching theme-color above, so the bar always reads well
+         in both dark and light themes. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   </head>
   <body>
     <div id="root"></div>

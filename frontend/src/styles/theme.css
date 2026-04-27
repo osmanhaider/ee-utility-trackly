@@ -109,6 +109,19 @@ html, body {
 
 #root {
   min-height: 100vh;
+  /* Honour the iOS home-indicator safe area when running as a standalone
+     PWA (Add to Home Screen). The header pulls in safe-area-inset-top via
+     a util class below so the sticky bar clears the notch / Dynamic
+     Island; this rule covers the bottom for content. */
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+/* Apply to elements that should sit below the status-bar overlay when
+   running as an iOS PWA with status-bar-style "black-translucent". The
+   sticky <header> in App.tsx adds this class so the notch / Dynamic
+   Island doesn't cover the brand and tab strip. */
+.safe-top {
+  padding-top: calc(env(safe-area-inset-top, 0px) + var(--safe-top-extra, 0px));
 }
 
 input, select, textarea, button {
