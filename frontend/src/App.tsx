@@ -19,13 +19,23 @@ import { useTheme } from "./theme";
 
 type Tab = "upload" | "bills" | "analytics" | "community" | "settings" | "help";
 type AuthState = "loading" | "required" | "authed";
+const TABS: Tab[] = ["upload", "bills", "analytics", "community", "settings", "help"];
+
+function tabFromHash(): Tab {
+  const raw = window.location.hash.replace(/^#\/?/, "").toLowerCase();
+  return TABS.includes(raw as Tab) ? (raw as Tab) : "upload";
+}
+
+function hashForTab(tab: Tab): string {
+  return `#/${tab}`;
+}
 
 export default function App() {
   // Drives the document `data-theme` attribute so the whole app retheme
   // happens via CSS vars in styles/theme.css.
   useTheme();
 
-  const [tab, setTab] = useState<Tab>("upload");
+  const [tab, setTab] = useState<Tab>(() => tabFromHash());
   const [refreshKey, setRefreshKey] = useState(0);
   const [uploadsRunning, setUploadsRunning] = useState(false);
   // Lazy initial: skip the loading state entirely if there's no token to verify.
@@ -37,6 +47,18 @@ export default function App() {
   const isMobile = useIsMobile();
 
   const refresh = () => setRefreshKey((k) => k + 1);
+
+  useEffect(() => {
+    const onHashChange = () => setTab(tabFromHash());
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  const navigateTab = (next: Tab) => {
+    if (tab === next) return;
+    window.history.pushState(null, "", hashForTab(next));
+    setTab(next);
+  };
 
   // On mount, validate the stored token by hitting /api/auth/me. The axios
   // 401 interceptor handles expired tokens by emitting `auth:logout`.
@@ -172,7 +194,7 @@ export default function App() {
             return (
               <button
                 key={id}
-                onClick={() => setTab(id)}
+                onClick={() => navigateTab(id)}
                 title={label}
                 className="btn-press"
                 style={{
@@ -362,7 +384,7 @@ export default function App() {
             aria-hidden={tab !== "upload"}
           >
             <UploadTab
-              onSuccess={() => { refresh(); setTab("bills"); }}
+              onSuccess={() => { refresh(); navigateTab("bills"); }}
               onRunningChange={setUploadsRunning}
               isActive={tab === "upload"}
             />
