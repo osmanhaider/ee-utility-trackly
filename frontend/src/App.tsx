@@ -33,6 +33,7 @@ export default function App() {
     getToken() ? "loading" : "required",
   );
   const [me, setMe] = useState<User | null>(null);
+  const [profileOpen, setProfileOpen] = useState(false);
   const isMobile = useIsMobile();
 
   const refresh = () => setRefreshKey((k) => k + 1);
@@ -78,6 +79,7 @@ export default function App() {
   const logout = () => {
     clearToken();
     setMe(null);
+    setProfileOpen(false);
     setAuthState("required");
   };
 
@@ -215,83 +217,133 @@ export default function App() {
           <ThemeToggle compact={isMobile} />
 
           {me && (
-            <div
-              title={me.email ?? me.name ?? ""}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                marginLeft: isMobile ? 4 : 8,
-                padding: isMobile ? "4px 6px" : "4px 10px 4px 4px",
-                borderRadius: 999,
-                border: "1px solid var(--border)",
-                background: "var(--surface-1)",
-              }}
-            >
-              {me.picture ? (
-                <img
-                  src={me.picture}
-                  alt=""
-                  width={26}
-                  height={26}
-                  referrerPolicy="no-referrer"
-                  style={{ borderRadius: "50%", display: "block" }}
-                />
-              ) : (
-                <div
-                  style={{
-                    width: 26,
-                    height: 26,
-                    borderRadius: "50%",
-                    background: "var(--accent)",
-                    color: "var(--text-on-accent)",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontSize: 12,
-                    fontWeight: 600,
-                  }}
-                >
-                  {(me.name ?? me.email ?? "?").slice(0, 1).toUpperCase()}
-                </div>
-              )}
-              {!isMobile && (
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: "var(--text-2)",
-                    maxWidth: 140,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {me.name ?? me.email}
-                </span>
+            <div style={{ position: "relative", marginLeft: isMobile ? 4 : 8, flexShrink: 0 }}>
+              <button
+                type="button"
+                onClick={() => setProfileOpen(open => !open)}
+                title={me.email ?? me.name ?? "Profile"}
+                aria-haspopup="menu"
+                aria-expanded={profileOpen}
+                className="btn-press"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: isMobile ? "4px 6px" : "4px 10px 4px 4px",
+                  borderRadius: 999,
+                  border: "1px solid var(--border)",
+                  background: profileOpen ? "var(--accent-soft)" : "var(--surface-1)",
+                  color: profileOpen ? "var(--accent)" : "var(--text-2)",
+                  cursor: "pointer",
+                }}
+              >
+                {me.picture ? (
+                  <img
+                    src={me.picture}
+                    alt=""
+                    width={26}
+                    height={26}
+                    referrerPolicy="no-referrer"
+                    style={{ borderRadius: "50%", display: "block" }}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      width: 26,
+                      height: 26,
+                      borderRadius: "50%",
+                      background: "var(--accent)",
+                      color: "var(--text-on-accent)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: 12,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {(me.name ?? me.email ?? "?").slice(0, 1).toUpperCase()}
+                  </div>
+                )}
+                {!isMobile && (
+                  <span
+                    style={{
+                      fontSize: 12,
+                      maxWidth: 140,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {me.name ?? me.email}
+                  </span>
+                )}
+              </button>
+              {profileOpen && (
+                <>
+                  <button
+                    aria-label="Close profile menu"
+                    onClick={() => setProfileOpen(false)}
+                    style={{
+                      position: "fixed",
+                      inset: 0,
+                      background: "transparent",
+                      border: "none",
+                      padding: 0,
+                      cursor: "default",
+                      zIndex: 29,
+                    }}
+                  />
+                  <div
+                    role="menu"
+                    className="slide-up"
+                    style={{
+                      position: "absolute",
+                      right: 0,
+                      top: "calc(100% + 10px)",
+                      zIndex: 30,
+                      minWidth: isMobile ? 220 : 240,
+                      background: "var(--surface-1)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 12,
+                      boxShadow: "var(--shadow-lg)",
+                      padding: 10,
+                    }}
+                  >
+                    <div style={{ padding: "6px 8px 10px", borderBottom: "1px solid var(--divider)", marginBottom: 8 }}>
+                      <div style={{ color: "var(--text-1)", fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {me.name ?? "Signed in"}
+                      </div>
+                      <div style={{ color: "var(--text-3)", fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {me.email}
+                      </div>
+                    </div>
+                    <button
+                      onClick={logout}
+                      role="menuitem"
+                      style={{
+                        width: "100%",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        background: "transparent",
+                        border: "none",
+                        borderRadius: 8,
+                        color: "var(--danger)",
+                        padding: "9px 10px",
+                        cursor: "pointer",
+                        fontSize: 13,
+                        fontWeight: 600,
+                        textAlign: "left",
+                      }}
+                    >
+                      <LogOut size={14} />
+                      Sign out
+                    </button>
+                  </div>
+                </>
               )}
             </div>
           )}
-          <button
-            onClick={logout}
-            title="Sign out"
-            className="btn-press"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              padding: isMobile ? "8px 10px" : "8px 12px",
-              borderRadius: 8,
-              border: "1px solid var(--border)",
-              cursor: "pointer",
-              fontSize: 13,
-              background: "var(--surface-1)",
-              color: "var(--text-2)",
-              marginLeft: isMobile ? 4 : 6,
-            }}
-          >
-            <LogOut size={14} />
-            {!isMobile && "Sign out"}
-          </button>
         </nav>
       </header>
 
