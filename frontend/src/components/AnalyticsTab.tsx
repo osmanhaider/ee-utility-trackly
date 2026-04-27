@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useIsMobile } from "../hooks/useIsMobile";
-import { api, type AnalyticsSummary } from "../api";
+import { useTheme } from "../theme";
+import { api, type AnalyticsSummary, type DeltaCoverage } from "../api";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, RadarChart, Radar,
   PolarGrid, PolarAngleAxis, AreaChart, Area, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer,
 } from "recharts";
-import { TrendingUp, TrendingDown, Minus, Loader2, AlertCircle, Download } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, Loader2, AlertCircle, Download, Info } from "lucide-react";
 import html2canvas from "html2canvas";
 import jsPDF from "jspdf";
 
@@ -48,6 +49,71 @@ function labelFor(t: string) {
 
 function colorFor(t: string, i = 0) {
   return COLORS[t] ?? PALETTE[i % PALETTE.length];
+}
+
+// ── Pie-slice text contrast ──────────────────────────────────────────────
+// Resolves a slice fill (hex or `var(--token)`) and returns a text color
+// (#0f172a or #ffffff) that maintains WCAG-friendly contrast on top of it.
+// Used by the share-of-spend pie so amber/light slices don't render
+// white-on-white in light mode.
+const TEXT_DARK = "#0f172a";
+const TEXT_LIGHT = "#ffffff";
+
+function resolveCssVar(value: string): string {
+  if (typeof window === "undefined") return value;
+  const m = value.match(/var\((--[^,)\s]+)/);
+  if (!m) return value;
+  const v = getComputedStyle(document.documentElement).getPropertyValue(m[1]).trim();
+  return v || value;
+}
+
+function contrastTextOn(bg: string): string {
+  const resolved = resolveCssVar(bg);
+  const hex = resolved.replace("#", "");
+  if (hex.length !== 6) return TEXT_LIGHT;
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  if ([r, g, b].some(Number.isNaN)) return TEXT_LIGHT;
+  // YIQ luma — values >= 140 are bright enough that dark text reads better.
+  const yiq = (r * 299 + g * 587 + b * 114) / 1000;
+  return yiq >= 140 ? TEXT_DARK : TEXT_LIGHT;
+}
+
+// ── Coverage badge ───────────────────────────────────────────────────────
+// MoM/YoY are computed on the intersection of utility types present in
+// both months. When that intersection is a strict subset, surface a small
+// "partial" badge so a +50% MoM caused purely by adding a new utility
+// type isn't read as price inflation.
+function CoverageBadge({ coverage, delta }: { coverage: DeltaCoverage; delta: "MoM" | "YoY" }) {
+  if (coverage !== "partial") return null;
+  const tooltip =
+    `${delta} compares only the utility types present in both months. ` +
+    `Categories that exist in one month but not the other are excluded ` +
+    `so newly-added (or missing) utilities don't masquerade as a price change.`;
+  return (
+    <span
+      title={tooltip}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 3,
+        marginLeft: 6,
+        padding: "1px 6px",
+        borderRadius: 999,
+        background: "var(--warning-soft)",
+        color: "var(--warning)",
+        fontSize: 10,
+        fontWeight: 600,
+        lineHeight: 1.4,
+        cursor: "help",
+        verticalAlign: "middle",
+      }}
+    >
+      <Info size={10} />
+      partial
+    </span>
+  );
 }
 
 const legendStyle = {
@@ -156,7 +222,7 @@ function PctBadge({ v, label }: { v: number | null; label: string }) {
   );
 }
 
-function StatCard({ label, value, sub, trend }: { label: string; value: string; sub?: string; trend?: "up" | "down" | "flat" }) {
+function StatCard({ label, value, sub, trend }: { label: string; value: string; sub?: React.ReactNode; trend?: "up" | "down" | "flat" }) {
   return (
     <div
       className="lift"
@@ -225,6 +291,10 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const isMobile = useIsMobile();
+  // Subscribing to the resolved theme forces a re-render on light/dark
+  // switches so colour-dependent computations like pie-slice contrast
+  // pick up the new CSS-variable values.
+  useTheme();
   const dashboardRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -357,8 +427,10 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
 
   const totalSpend = data.totals.total_eur;
   const latestMonth = data.monthly_total[data.monthly_total.length - 1];
-  const prevMonth = data.monthly_total[data.monthly_total.length - 2];
-  const momChange = latestMonth.mom_delta_pct ?? (prevMonth ? ((latestMonth.total_eur - prevMonth.total_eur) / prevMonth.total_eur * 100) : null);
+  // Trust the backend's calendar-aware delta — it is already null when
+  // the immediately preceding calendar month has no data, so a row-based
+  // fallback would misleadingly fill those gaps.
+  const momChange = latestMonth.mom_delta_pct;
   const latestYoy = latestMonth.yoy_delta_pct;
 
   const momRows = data.monthly_total
@@ -389,12 +461,18 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
     .map(r => ({ month: r.month, delta: r.yoy_delta_pct!, eur: r.yoy_delta_eur! }));
 
   const radarTypes = types.slice(0, 5);
+  // Use weighted averages (Σtotal / Σcount) so the season's value reflects
+  // the true per-bill average across the season's months instead of
+  // averaging averages (which gave equal weight to a 1-bill month and a
+  // 6-bill month).
   const radarData = ["Winter", "Spring", "Summer", "Autumn"].map((season, si) => {
     const entry: Record<string, string | number> = { season };
     const months = [[12, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]][si];
     for (const t of radarTypes) {
       const relevant = data.seasonal.filter(r => months.includes(parseInt(r.month_num)) && r.utility_type === t);
-      entry[t] = relevant.length ? parseFloat((relevant.reduce((s, r) => s + r.avg_eur, 0) / relevant.length).toFixed(2)) : 0;
+      const totalEur = relevant.reduce((s, r) => s + (r.total_eur ?? 0), 0);
+      const billCount = relevant.reduce((s, r) => s + (r.bill_count ?? 0), 0);
+      entry[t] = billCount ? parseFloat((totalEur / billCount).toFixed(2)) : 0;
     }
     return entry;
   });
@@ -419,18 +497,26 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
   // (side-by-side line item comparison).
   const [prevMonthLabel, latestMonthLabel] = liMonths.slice(-2);
 
-  // Unit-price trend per line item across months
+  // Unit-price trend per line item across months. The backend already
+  // aggregates duplicate (month, label) rows with a quantity-weighted unit
+  // price, so a direct lookup is safe and we don't need to defend against
+  // overwriting duplicates here.
   const unitPriceByLabel: Record<string, Record<string, number | string>> = {};
   for (const r of lit) {
     if (r.unit_price == null) continue;
     if (!unitPriceByLabel[r.month]) unitPriceByLabel[r.month] = { month: r.month };
-    unitPriceByLabel[r.month][r.description_en] = parseFloat(r.unit_price.toFixed(4));
+    unitPriceByLabel[r.month][r.description_en] = r.unit_price;
   }
   const unitPriceRows = Object.values(unitPriceByLabel).sort((a, b) => String(a.month).localeCompare(String(b.month)));
 
   // Price vs Consumption decomposition for metered items (have a unit_price and quantity).
   // Only compare the latest two months; older month-over-month changes are less
   // actionable and made the chart noisy.
+  //
+  // We use a Bennet (symmetric) decomposition so the two effects sum
+  // exactly to the total cost change, eliminating the residual cross-term
+  // that a Laspeyres split (Δp · q₀ + p₀ · Δq) silently drops:
+  //   Δcost = Δp · (q₀ + q₁)/2 + Δq · (p₀ + p₁)/2
   const meteredLabels = Array.from(new Set(
     lit.filter(r => r.unit_price != null && r.quantity != null && r.quantity > 0).map(r => r.description_en)
   ));
@@ -441,8 +527,10 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
     const prev = series.find(r => r.month === prevMonthLabel);
     const cur = series.find(r => r.month === latestMonthLabel);
     if (!prev || !cur || !prev.unit_price || !cur.unit_price || !prev.quantity || !cur.quantity) continue;
-    const priceEff = parseFloat(((cur.unit_price - prev.unit_price) * prev.quantity).toFixed(2));
-    const volEff   = parseFloat(((cur.quantity  - prev.quantity)  * prev.unit_price).toFixed(2));
+    const avgQ = (prev.quantity + cur.quantity) / 2;
+    const avgP = (prev.unit_price + cur.unit_price) / 2;
+    const priceEff = parseFloat(((cur.unit_price - prev.unit_price) * avgQ).toFixed(2));
+    const volEff   = parseFloat(((cur.quantity   - prev.quantity)   * avgP).toFixed(2));
     decompAll.push({
       label,
       month: cur.month,
@@ -608,20 +696,38 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
         <StatCard
           label="Latest Month"
           value={`€${latestMonth.total_eur.toFixed(2)}`}
-          sub={momChange != null ? `${momChange > 0 ? "+" : ""}${momChange.toFixed(1)}% MoM` : undefined}
+          sub={
+            momChange != null ? (
+              <>
+                {`${momChange > 0 ? "+" : ""}${momChange.toFixed(1)}% MoM`}
+                <CoverageBadge coverage={latestMonth.mom_coverage} delta="MoM" />
+              </>
+            ) : undefined
+          }
           trend={momChange == null ? undefined : momChange > 5 ? "up" : momChange < -5 ? "down" : "flat"}
         />
         {latestYoy != null && (
           <StatCard
             label="YoY Change"
             value={`${latestYoy > 0 ? "+" : ""}${latestYoy.toFixed(1)}%`}
-            sub={latestMonth.yoy_delta_eur != null ? `€${latestMonth.yoy_delta_eur > 0 ? "+" : ""}${latestMonth.yoy_delta_eur.toFixed(2)} vs same month last year` : "vs same month last year"}
+            sub={
+              <>
+                {latestMonth.yoy_delta_eur != null
+                  ? `€${latestMonth.yoy_delta_eur > 0 ? "+" : ""}${latestMonth.yoy_delta_eur.toFixed(2)} vs same month last year`
+                  : "vs same month last year"}
+                <CoverageBadge coverage={latestMonth.yoy_coverage} delta="YoY" />
+              </>
+            }
             trend={latestYoy > 5 ? "up" : latestYoy < -5 ? "down" : "flat"}
           />
         )}
         <StatCard label="3-Month Avg" value={`€${latestMonth.rolling_avg_3m.toFixed(2)}`} sub="rolling average" />
         <StatCard label="Highest Single Bill" value={`€${data.totals.max_eur.toFixed(2)}`} />
-        <StatCard label="Monthly Avg (all time)" value={`€${(totalSpend / Math.max(data.monthly_total.length, 1)).toFixed(2)}`} />
+        <StatCard
+          label="Avg per Active Month"
+          value={`€${(totalSpend / Math.max(data.monthly_total.length, 1)).toFixed(2)}`}
+          sub={`across ${data.monthly_total.length} months with data`}
+        />
         {data.by_type.find(t => t.total_kwh) && (
           <StatCard label="Total Electricity" value={`${data.by_type.find(t => t.total_kwh)!.total_kwh!.toFixed(0)} kWh`} />
         )}
@@ -748,11 +854,17 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
                     <tr key={row.month} style={{ borderBottom: i < data.monthly_total.length - 1 ? "1px solid var(--divider)" : "none" }}>
                       <td style={{ padding: "10px 16px", color: "var(--text-1)", fontWeight: 500 }}>{row.month}</td>
                       <td style={{ padding: "10px 16px", color: "var(--success)", fontVariantNumeric: "tabular-nums" }}>€{row.total_eur.toFixed(2)}</td>
-                      <td style={{ padding: "10px 16px" }}><PctBadge v={row.mom_delta_pct} label="MoM" /></td>
+                      <td style={{ padding: "10px 16px" }}>
+                        <PctBadge v={row.mom_delta_pct} label="MoM" />
+                        <CoverageBadge coverage={row.mom_coverage} delta="MoM" />
+                      </td>
                       <td style={{ padding: "10px 16px", color: row.mom_delta_eur == null ? "var(--text-3)" : row.mom_delta_eur > 0 ? "var(--danger)" : "var(--success)", fontVariantNumeric: "tabular-nums", fontSize: 13 }}>
                         {row.mom_delta_eur != null ? `${row.mom_delta_eur > 0 ? "+" : ""}€${row.mom_delta_eur.toFixed(2)}` : "—"}
                       </td>
-                      <td style={{ padding: "10px 16px" }}><PctBadge v={row.yoy_delta_pct} label="YoY" /></td>
+                      <td style={{ padding: "10px 16px" }}>
+                        <PctBadge v={row.yoy_delta_pct} label="YoY" />
+                        <CoverageBadge coverage={row.yoy_coverage} delta="YoY" />
+                      </td>
                       <td style={{ padding: "10px 16px", color: row.yoy_delta_eur == null ? "var(--text-3)" : row.yoy_delta_eur > 0 ? "var(--danger)" : "var(--success)", fontVariantNumeric: "tabular-nums", fontSize: 13 }}>
                         {row.yoy_delta_eur != null ? `${row.yoy_delta_eur > 0 ? "+" : ""}€${row.yoy_delta_eur.toFixed(2)}` : "—"}
                       </td>
@@ -795,17 +907,20 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
                 outerRadius={95}
                 paddingAngle={2}
                 label={(props) => {
-                  const { cx, cy, midAngle, innerRadius, outerRadius, percent } = props as {
+                  const { cx, cy, midAngle, innerRadius, outerRadius, percent, fill } = props as {
                     cx: number; cy: number; midAngle: number;
                     innerRadius: number; outerRadius: number; percent: number;
+                    fill: string;
                   };
                   if (!percent || percent < 0.04) return null;
                   const RAD = Math.PI / 180;
                   const r = (innerRadius + outerRadius) / 2;
                   const x = cx + r * Math.cos(-midAngle * RAD);
                   const y = cy + r * Math.sin(-midAngle * RAD);
+                  // Pick black or white based on the slice's actual luma so
+                  // amber/light slices remain readable in both themes.
                   return (
-                    <text x={x} y={y} fill="white" textAnchor="middle" dominantBaseline="central" fontSize={12} fontWeight={600}>
+                    <text x={x} y={y} fill={contrastTextOn(fill)} textAnchor="middle" dominantBaseline="central" fontSize={12} fontWeight={600}>
                       {`${(percent * 100).toFixed(0)}%`}
                     </text>
                   );
@@ -938,7 +1053,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14, minWidth: 520 }}>
           <thead>
             <tr style={{ borderBottom: "1px solid var(--border)" }}>
-              {["Type", "Bills", "Total", "Avg/Month", "Min", "Max", "Consumption"].map(h => (
+              {["Type", "Bills", "Total", "Avg/Bill", "Min", "Max", "Consumption"].map(h => (
                 <th key={h} style={{ padding: "12px 16px", textAlign: "left", color: "var(--text-3)", fontWeight: 600, fontSize: 12, textTransform: "uppercase" }}>{h}</th>
               ))}
             </tr>
@@ -1026,7 +1141,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
           <SectionTitle>⚖️ 11. Price vs Consumption Decomposition</SectionTitle>
           <ChartCard
             title="What drove the cost change? Price or usage?"
-            subtitle={`${prevMonthLabel} → ${latestMonthLabel} only · Red = price effect · Blue = volume effect`}
+            subtitle={`${prevMonthLabel} → ${latestMonthLabel} · Bennet decomposition (price + volume = total) · Red = price effect · Blue = volume effect`}
           >
             <div style={{ overflowX: "auto" }}>
               <ResponsiveContainer width={Math.max(600, decompRows.length * 100)} height={360}>

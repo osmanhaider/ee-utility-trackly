@@ -135,7 +135,9 @@ export interface YearStat {
   year: string;
   utility_type: string;
   total_eur: number;
-  avg_monthly_eur: number;
+  /** Average amount per bill-category row (one row per bill split into
+   *  this category). Not a per-calendar-month average. */
+  avg_per_bill_eur: number;
   bill_count: number;
 }
 
@@ -149,6 +151,8 @@ export interface AnnualTotal {
 export interface SeasonalStat {
   month_num: string;
   avg_eur: number;
+  total_eur: number;
+  bill_count: number;
   utility_type: string;
 }
 
@@ -159,14 +163,24 @@ export interface ProviderStat {
   avg_eur: number;
 }
 
+export type DeltaCoverage = "full" | "partial" | "none";
+
 export interface MonthlyTotal {
   month: string;
   total_eur: number;
+  /** Calendar-aware trailing 3-month average. Falls back to fewer points
+   *  on sparse data; equals total_eur when only this month has data. */
   rolling_avg_3m: number;
+  /** Coverage-aware MoM/YoY: computed on the intersection of utility
+   *  types present in both months so that adding a new category mid-year
+   *  doesn't show up as inflation. The `*_coverage` flag reports whether
+   *  the comparison used the full set or only an intersection. */
   mom_delta_eur: number | null;
   mom_delta_pct: number | null;
+  mom_coverage: DeltaCoverage;
   yoy_delta_eur: number | null;
   yoy_delta_pct: number | null;
+  yoy_coverage: DeltaCoverage;
 }
 
 export const api = {

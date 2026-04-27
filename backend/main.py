@@ -878,10 +878,6 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
     where_provider, params_provider = _build_bill_filter(
         user_id_filter, public_only, ["amount_eur IS NOT NULL", "provider IS NOT NULL"]
     )
-    where_raw, params_raw = _build_bill_filter(
-        user_id_filter, public_only, ["raw_json IS NOT NULL"]
-    )
-
     async with _db() as db:
 
         # Fetch every bill so we can split korteriühistu bills into their
@@ -975,7 +971,20 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
                 cat = classify_line_item(item.get("description_et") or "")
                 bill_cat_totals[(bid, cat)] += float(amt)
                 attributed = True
-            if not attributed and bill["amount_eur"] is not None:
+            if attributed and bill["amount_eur"] is not None:
+                # Reconcile line-item splits to the headline bill amount.
+                # Real korteriühistu invoices include VAT, rounding,
+                # prepaid balances and fees that aren't surfaced as
+                # classified line items, so the residual is bucketed
+                # under "other" to keep per-category aggregations
+                # summing to amount_eur.
+                attributed_total = sum(
+                    v for (b, _), v in bill_cat_totals.items() if b == bid
+                )
+                residual = round(float(bill["amount_eur"]) - attributed_total, 2)
+                if abs(residual) > 0.01:
+                    bill_cat_totals[(bid, "other")] += residual
+            elif not attributed and bill["amount_eur"] is not None:
                 bill_cat_totals[(bid, "other")] = float(bill["amount_eur"])
         elif bill["amount_eur"] is not None:
             bill_cat_totals[(bid, bill_type)] = float(bill["amount_eur"])
@@ -1042,7 +1051,10 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
 
     by_year = sorted(
         [{"year": y, "utility_type": t, "total_eur": round(sum(amts), 2),
-          "avg_monthly_eur": round(sum(amts) / len(amts), 2) if amts else 0.0,
+          # avg_per_bill_eur reflects the average amount per bill-category
+          # row (one row per bill split into its category portion); it is
+          # NOT a per-calendar-month average.
+          "avg_per_bill_eur": round(sum(amts) / len(amts), 2) if amts else 0.0,
           "bill_count": len(amts)}
          for (y, t), amts in year_agg.items()],
         key=lambda r: (r["year"], r["utility_type"]),
@@ -1077,7 +1089,11 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
 
     seasonal = sorted(
         [{"month_num": mn, "utility_type": t,
-          "avg_eur": round(sum(amts) / len(amts), 2) if amts else 0.0}
+          "avg_eur": round(sum(amts) / len(amts), 2) if amts else 0.0,
+          # total_eur and bill_count let the frontend radar compute weighted
+          # season averages (Σtotal / Σcount) instead of averaging averages.
+          "total_eur": round(sum(amts), 2),
+          "bill_count": len(amts)}
          for (mn, t), amts in seasonal_agg.items()],
         key=lambda r: (r["month_num"], r["utility_type"]),
     )
@@ -1099,50 +1115,112 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
         totals = {"bill_count": 0, "total_eur": 0.0, "avg_eur": 0.0,
                   "min_eur": 0.0, "max_eur": 0.0}
 
-    # Compute rolling 3-month average on total
-    for i, row in enumerate(monthly_total):
-        window = monthly_total[max(0, i-2):i+1]
-        row["rolling_avg_3m"] = sum(r["total_eur"] for r in window) / len(window)
+    def _prev_month_key(month_key: str) -> str:
+        y, m = month_key.split("-")
+        yi, mi = int(y), int(m)
+        if mi == 1:
+            return f"{yi - 1:04d}-12"
+        return f"{yi:04d}-{mi - 1:02d}"
 
-    # MoM delta per month
-    for i, row in enumerate(monthly_total):
-        prev = monthly_total[i - 1]["total_eur"] if i > 0 else None
-        row["mom_delta_eur"] = round(row["total_eur"] - prev, 2) if prev is not None else None
-        row["mom_delta_pct"] = round((row["total_eur"] - prev) / prev * 100, 1) if prev else None
-
-    # YoY delta per month
     month_map = {r["month"]: r["total_eur"] for r in monthly_total}
+
+    # Calendar-aware rolling 3-month average — averages months in
+    # [m-2, m-1, m] that have data. Sparse data still produces a sensible
+    # value (it equals m's own value when only m has data) without
+    # silently spanning many calendar months as the row-based window did.
+    for row in monthly_total:
+        keys = [row["month"]]
+        p = row["month"]
+        for _ in range(2):
+            p = _prev_month_key(p)
+            keys.append(p)
+        values = [month_map[k] for k in keys if k in month_map]
+        row["rolling_avg_3m"] = (
+            round(sum(values) / len(values), 2) if values else 0.0
+        )
+
+    # Coverage-aware MoM/YoY: compares the *intersection* of utility types
+    # present in both months so a newly-uploaded category (e.g. user adds
+    # internet bills mid-year) doesn't masquerade as a +50% price hike.
+    # Sub-1%-of-month categories are treated as noise so that residual
+    # "other" rounding amounts don't toggle the coverage flag.
+    month_types: dict[str, set[str]] = defaultdict(set)
+    month_type_total: dict[tuple[str, str], float] = defaultdict(float)
+    for r in by_month:
+        month_types[r["month"]].add(r["utility_type"])
+        month_type_total[(r["month"], r["utility_type"])] = r["total_eur"]
+
+    _COVERAGE_FLOOR_PCT = 0.01
+
+    def _significant_types(month_key: str) -> set[str]:
+        total = month_map.get(month_key, 0.0)
+        if total <= 0:
+            return set()
+        floor = total * _COVERAGE_FLOOR_PCT
+        return {
+            t for t in month_types.get(month_key, set())
+            if month_type_total[(month_key, t)] >= floor
+        }
+
+    def _comparable_delta(
+        cur_key: str, prev_key: str
+    ) -> tuple[float | None, float | None, str]:
+        """Return (delta_eur, delta_pct, coverage) for the cur→prev comparison.
+
+        coverage is one of:
+          - "full"    : both months share exactly the same utility-type set
+          - "partial" : compared on the intersection only; one or both
+                        months had additional utility types
+          - "none"    : no overlap (or no prev data) — deltas are None
+        """
+        if prev_key not in month_map:
+            return None, None, "none"
+        cur_types = _significant_types(cur_key)
+        prev_types = _significant_types(prev_key)
+        common = cur_types & prev_types
+        if not common:
+            return None, None, "none"
+        cur_sub = sum(month_type_total[(cur_key, t)] for t in common)
+        prev_sub = sum(month_type_total[(prev_key, t)] for t in common)
+        if prev_sub == 0:
+            return None, None, "none"
+        delta_eur = round(cur_sub - prev_sub, 2)
+        delta_pct = round((cur_sub - prev_sub) / prev_sub * 100, 1)
+        coverage = "full" if cur_types == prev_types else "partial"
+        return delta_eur, delta_pct, coverage
+
+    for row in monthly_total:
+        eur, pct, cov = _comparable_delta(row["month"], _prev_month_key(row["month"]))
+        row["mom_delta_eur"] = eur
+        row["mom_delta_pct"] = pct
+        row["mom_coverage"] = cov
+
     for row in monthly_total:
         y, m = row["month"].split("-")
-        prev_year_key = f"{int(y)-1}-{m}"
-        prev = month_map.get(prev_year_key)
-        row["yoy_delta_eur"] = round(row["total_eur"] - prev, 2) if prev else None
-        row["yoy_delta_pct"] = round((row["total_eur"] - prev) / prev * 100, 1) if prev else None
+        eur, pct, cov = _comparable_delta(row["month"], f"{int(y) - 1}-{m}")
+        row["yoy_delta_eur"] = eur
+        row["yoy_delta_pct"] = pct
+        row["yoy_coverage"] = cov
 
-    # Line-item level trends — extracted from raw_json of every bill
+    # Line-item level trends — aggregated per (month, item) so duplicate
+    # rows (multi-tariff electricity, multiple bills in the same month, etc.)
+    # combine into a single point with a quantity-weighted unit price.
     import re as _re_li
     _suffix_en = _re_li.compile(r"\s*\[Start:.*?\]\s*$")
     _suffix_et = _re_li.compile(r"\s+[Aa]lg[:\s].*$")
 
-    line_item_trends: list[dict] = []
-    async with _db() as db:
-        async with db.execute(
-            f"SELECT period_start, bill_date, upload_date, raw_json FROM bills "
-            f"WHERE {where_raw}",
-            params_raw,
-        ) as c:
-            bill_rows = await c.fetchall()
+    li_acc: dict[tuple[str, str], dict] = {}
 
-    for row in bill_rows:
-        date_str = row["period_start"] or row["bill_date"] or row["upload_date"]
+    for row_li in (r for r in all_bills if r.get("raw_json")):
+        date_str = row_li["period_start"] or row_li["bill_date"] or row_li["upload_date"]
         if not date_str:
             continue
         month = date_str[:7]
         try:
-            data = json.loads(row["raw_json"])
+            raw_data = json.loads(row_li["raw_json"])
         except (json.JSONDecodeError, TypeError):
             continue
-        for item in data.get("line_items") or []:
+        for item in raw_data.get("line_items") or []:
             en = (item.get("description_en") or "").strip()
             et = (item.get("description_et") or "").strip()
             amount = item.get("amount_eur")
@@ -1154,16 +1232,45 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
             # aggregates across months.
             en_key = _suffix_en.sub("", en).strip()
             et_key = _suffix_et.sub("", et).strip()
-            unit_price = round(amount / qty, 4) if qty and qty != 0 else None
-            line_item_trends.append({
-                "month": month,
-                "description_en": en_key,
-                "description_et": et_key,
-                "amount_eur": round(amount, 2),
-                "quantity": qty,
-                "unit": unit,
-                "unit_price": unit_price,
-            })
+            slot = li_acc.setdefault(
+                (month, en_key),
+                {
+                    "month": month,
+                    "description_en": en_key,
+                    "description_et": et_key,
+                    "amount_eur": 0.0,
+                    "quantity": 0.0,
+                    "has_quantity": False,
+                    "unit": unit,
+                },
+            )
+            slot["amount_eur"] += float(amount)
+            # Only sum quantity-bearing rows so the weighted unit price is
+            # well-defined; rows without quantity still contribute to the
+            # period's amount.
+            if qty is not None and qty != 0:
+                slot["quantity"] += float(qty)
+                slot["has_quantity"] = True
+            if unit and not slot["unit"]:
+                slot["unit"] = unit
+
+    line_item_trends: list[dict] = []
+    for slot in li_acc.values():
+        qty_total = slot["quantity"] if slot["has_quantity"] else None
+        unit_price = (
+            round(slot["amount_eur"] / qty_total, 4)
+            if qty_total
+            else None
+        )
+        line_item_trends.append({
+            "month": slot["month"],
+            "description_en": slot["description_en"],
+            "description_et": slot["description_et"],
+            "amount_eur": round(slot["amount_eur"], 2),
+            "quantity": round(qty_total, 4) if qty_total is not None else None,
+            "unit": slot["unit"],
+            "unit_price": unit_price,
+        })
 
     # Sort so frontend always gets chronological order
     line_item_trends.sort(key=lambda r: (r["month"], r["description_en"]))
