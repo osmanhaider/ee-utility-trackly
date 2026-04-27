@@ -95,10 +95,12 @@ function RichTooltip({
 
   return (
     <div style={{
-      background: "rgba(17, 24, 39, 0.96)",
-      border: "1px solid #374151", borderRadius: 8,
+      background: "var(--surface-1)",
+      border: "1px solid var(--border)",
+      borderRadius: 8,
       padding: "10px 14px", fontSize: 12,
-      minWidth: 180, boxShadow: "0 10px 30px rgba(0,0,0,0.4)",
+      minWidth: 180,
+      boxShadow: "var(--shadow-lg)",
     }}>
       {labelText && <div style={{ color: "var(--text-1)", fontWeight: 600, marginBottom: 8, fontSize: 12 }}>{labelText}</div>}
       {shown.map((p, i) => (
@@ -117,7 +119,7 @@ function RichTooltip({
         </div>
       )}
       {showTotal && items.length > 1 && (
-        <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid #374151", marginTop: 8, paddingTop: 6, color: "var(--text-1)", fontWeight: 600 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid var(--border)", marginTop: 8, paddingTop: 6, color: "var(--text-1)", fontWeight: 600 }}>
           <span>Total</span>
           <span style={{ fontVariantNumeric: "tabular-nums" }}>{fmt(total)}</span>
         </div>
