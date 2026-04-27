@@ -6,6 +6,8 @@
 
 Upload any invoice or bill (image or PDF), get it parsed into structured line items, and explore spending patterns through a 12-section analytics dashboard.
 
+This project is **open source**. Contributions, bug reports, feature ideas, parser improvements, provider additions, and Estonian utility-bill edge cases are very welcome.
+
 Three extraction backends are available:
 - **Local OCR** *(default)* — Tesseract + `pdfplumber`, optimized for Estonian utility bills. Runs entirely locally, no API key required.
 - **Free AI via FreeLLMAPI** *(recommended for non-Estonian or unusual invoices)* — local OCR/PDF text extraction followed by routed LLM JSON extraction. Set `PARSER_BACKEND=freellmapi`.
@@ -361,9 +363,15 @@ Filename: `utility-bills-dashboard-YYYY-MM-DD.pdf`
 
 ## Contributing
 
-Bug reports, PRs and Estonian term additions are welcome. Fork, branch, send a pull request —
-the codebase is small, tests live in `backend/test_*.py`, and the frontend type-checks with
-`tsc --noEmit` and builds with `vite build`.
+This utility app is open source and contributions are welcome. Good first contributions include:
+
+- adding or improving Estonian utility-bill parsing examples,
+- expanding the translation glossary in `backend/translation.py`,
+- adding AI provider presets for BYOK extraction,
+- improving mobile UX, accessibility, and dashboard readability,
+- writing focused tests for parser or analytics edge cases.
+
+Fork the repo, create a branch, and send a pull request. The codebase is intentionally small: backend tests live in `backend/test_*.py`, and the frontend type-checks with `tsc --noEmit` and builds with `vite build`.
 
 ## License
 
