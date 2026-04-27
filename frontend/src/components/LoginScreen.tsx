@@ -431,9 +431,9 @@ export default function LoginScreen({ onSuccess }: Props) {
               lineHeight: 1.5,
             }}
           >
-            By signing in you accept that this is a hobby project,
-            your data lives on a free Render disk that resets on every redeploy,
-            and at least one of these jokes will land.
+            By signing in you accept that this is a hobby project, your parsed
+            bill data lives in Supabase/Postgres, and at least one of these
+            jokes will land.
           </div>
         </div>
 
