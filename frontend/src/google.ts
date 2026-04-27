@@ -13,9 +13,15 @@ declare global {
         id: {
           initialize: (config: {
             client_id: string;
-            callback: (response: { credential: string }) => void;
+            callback?: (response: { credential: string }) => void;
             auto_select?: boolean;
             cancel_on_tap_outside?: boolean;
+            /** When set to "redirect", GIS does a full-page POST to
+             *  `login_uri` instead of using the popup/iframe credential
+             *  callback. Required for iOS standalone PWAs where the
+             *  popup credential delivery is broken. */
+            ux_mode?: "popup" | "redirect";
+            login_uri?: string;
           }) => void;
           renderButton: (
             parent: HTMLElement,
@@ -60,4 +66,17 @@ export function loadGoogleIdentityServices(): Promise<void> {
 
 export function getGoogleClientId(): string {
   return import.meta.env.VITE_GOOGLE_CLIENT_ID ?? "";
+}
+
+/** True for iPhone / iPad Safari, including iPadOS-as-Mac (which reports
+ *  "MacIntel" but has touch points). The popup-based GIS flow misbehaves
+ *  on iOS standalone PWAs (storage partitioning + cross-origin
+ *  postMessage), so the login screen swaps to a full-page redirect flow
+ *  on these devices. */
+export function isIOSDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  if (/iPhone|iPad|iPod/.test(ua)) return true;
+  // iPadOS 13+ identifies as MacIntel but has touch.
+  return navigator.platform === "MacIntel" && (navigator.maxTouchPoints ?? 0) > 1;
 }

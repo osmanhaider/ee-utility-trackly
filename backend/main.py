@@ -9,9 +9,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 import auth as auth_mod
@@ -250,6 +250,7 @@ app.add_middleware(
 # frontend builds) requires a valid bearer.
 _AUTH_EXEMPT_PATHS = frozenset({
     "/api/auth/google",
+    "/api/auth/google-redirect",
     "/api/auth/status",
 })
 
@@ -333,6 +334,64 @@ async def auth_google(body: GoogleLoginRequest):
             "picture": identity.picture,
         },
     }
+
+
+@app.post("/api/auth/google-redirect")
+async def auth_google_redirect(
+    credential: str = Form(...),
+    g_csrf_token: str = Form(...),
+    csrf_cookie: str | None = Cookie(default=None, alias="g_csrf_token"),
+):
+    """Server-side endpoint for Google Identity Services' redirect (`ux_mode`)
+    flow.
+
+    Used by clients that can't reliably receive credentials via the
+    iframe/popup flow — most notably iOS Safari running as a standalone
+    home-screen PWA, where storage partitioning and cross-origin
+    postMessage restrictions cause the popup-based flow to fail with
+    "try again" right after the user confirms.
+
+    Google posts a form-encoded body containing `credential` (the ID
+    token) and `g_csrf_token`. CSRF protection requires the form's
+    `g_csrf_token` to equal the same-named cookie Google sets, per
+    https://developers.google.com/identity/gsi/web/guides/verify-google-id-token.
+    """
+    frontend_url = (os.environ.get("FRONTEND_URL") or "/").rstrip("/")
+
+    def _bounce(error: str) -> RedirectResponse:
+        # Send the user back to the SPA with an error in the fragment so
+        # the in-page handler can surface it next to the sign-in button.
+        return RedirectResponse(
+            f"{frontend_url}/auth/callback#error={error}",
+            status_code=303,
+        )
+
+    if not csrf_cookie or csrf_cookie != g_csrf_token:
+        return _bounce("csrf")
+
+    try:
+        identity = google_auth_mod.verify_google_id_token(credential)
+    except google_auth_mod.GoogleAuthError as e:
+        logger.warning("google-redirect verify failed: %s", e)
+        return _bounce("invalid-token")
+
+    async with _db() as db:
+        await _upsert_user(db, identity)
+        await db.commit()
+
+    token = auth_mod.create_token(
+        sub=identity.sub,
+        email=identity.email,
+        name=identity.name,
+        picture=identity.picture,
+    )
+
+    # Token in the URL fragment so it never leaves the browser (fragments
+    # aren't sent in the HTTP request line / proxies / server logs).
+    return RedirectResponse(
+        f"{frontend_url}/auth/callback#token={token}",
+        status_code=303,
+    )
 
 
 @app.get("/api/auth/me")

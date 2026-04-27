@@ -4,8 +4,8 @@ import {
 } from "lucide-react";
 import axios from "axios";
 import { api } from "../api";
-import { setToken } from "../auth";
-import { getGoogleClientId, loadGoogleIdentityServices } from "../google";
+import { readAuthCallbackError, setToken } from "../auth";
+import { getGoogleClientId, isIOSDevice, loadGoogleIdentityServices } from "../google";
 import { useTheme } from "../theme";
 
 interface Props {
@@ -42,9 +42,24 @@ const FEATURES: { icon: React.ElementType; title: string; body: string }[] = [
   },
 ];
 
+const REDIRECT_ERROR_MESSAGES: Record<string, string> = {
+  csrf:
+    "Sign-in failed CSRF check. This usually means the session was opened in one browser and finished in another — try again.",
+  "invalid-token":
+    "Google rejected the sign-in token. Try again, or use a different Google account.",
+};
+
 export default function LoginScreen({ onSuccess }: Props) {
   const buttonRef = useRef<HTMLDivElement | null>(null);
-  const [runtimeError, setRuntimeError] = useState<string | null>(null);
+  // Surface any error stashed by the iOS redirect-callback handler
+  // (/auth/callback#error=…) so the user sees it after they get bounced
+  // back to the login screen. One-shot read; sessionStorage clears on
+  // first call.
+  const [runtimeError, setRuntimeError] = useState<string | null>(() => {
+    const code = readAuthCallbackError();
+    if (!code) return null;
+    return REDIRECT_ERROR_MESSAGES[code] ?? "Sign-in didn't complete. Please try again.";
+  });
   const [exchanging, setExchanging] = useState(false);
   const [ready, setReady] = useState(false);
   const [taglineIdx, setTaglineIdx] = useState(() =>
@@ -52,9 +67,22 @@ export default function LoginScreen({ onSuccess }: Props) {
   );
   const clientId = getGoogleClientId();
   const { resolved } = useTheme();
-  const configError = !clientId
-    ? "Google sign-in is not configured. Set VITE_GOOGLE_CLIENT_ID on the frontend and GOOGLE_CLIENT_ID on the backend."
-    : null;
+  // iOS Safari (and especially the standalone home-screen PWA) cannot
+  // reliably receive credentials from GIS's popup/iframe flow — the
+  // credential delivery hits storage-partitioning and cross-origin
+  // postMessage walls, which surfaces as Google's "try again" right
+  // after the user confirms. Switch GIS to redirect mode there: Google
+  // does a full-page POST to a backend endpoint, which validates and
+  // redirects back to /auth/callback#token=… for the SPA to consume.
+  const useRedirectFlow = isIOSDevice();
+  const apiBase = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+  const loginUri = apiBase ? `${apiBase}/api/auth/google-redirect` : null;
+  const configError =
+    !clientId
+      ? "Google sign-in is not configured. Set VITE_GOOGLE_CLIENT_ID on the frontend and GOOGLE_CLIENT_ID on the backend."
+      : useRedirectFlow && !loginUri
+        ? "Sign-in needs VITE_API_URL configured on the frontend so iOS can redirect through the backend."
+        : null;
   const error = configError ?? runtimeError;
   const tagline = TAGLINES[taglineIdx];
 
@@ -70,30 +98,35 @@ export default function LoginScreen({ onSuccess }: Props) {
 
   useEffect(() => {
     if (!clientId) return;
+    if (useRedirectFlow && !loginUri) return; // configError already surfaces this
     let cancelled = false;
     loadGoogleIdentityServices()
       .then(() => {
         if (cancelled || !window.google || !buttonRef.current) return;
         window.google.accounts.id.initialize({
           client_id: clientId,
-          callback: async (resp) => {
-            setRuntimeError(null);
-            setExchanging(true);
-            try {
-              const r = await api.loginWithGoogle(resp.credential);
-              setToken(r.data.token);
-              onSuccess();
-            } catch (e) {
-              if (axios.isAxiosError(e)) {
-                const detail = (e.response?.data as { detail?: string } | undefined)?.detail;
-                setRuntimeError(detail ?? "Sign-in failed. Please try again.");
-              } else {
-                setRuntimeError("Could not reach the server. Check your connection.");
-              }
-            } finally {
-              setExchanging(false);
-            }
-          },
+          ...(useRedirectFlow
+            ? { ux_mode: "redirect", login_uri: loginUri ?? undefined }
+            : {
+                callback: async (resp) => {
+                  setRuntimeError(null);
+                  setExchanging(true);
+                  try {
+                    const r = await api.loginWithGoogle(resp.credential);
+                    setToken(r.data.token);
+                    onSuccess();
+                  } catch (e) {
+                    if (axios.isAxiosError(e)) {
+                      const detail = (e.response?.data as { detail?: string } | undefined)?.detail;
+                      setRuntimeError(detail ?? "Sign-in failed. Please try again.");
+                    } else {
+                      setRuntimeError("Could not reach the server. Check your connection.");
+                    }
+                  } finally {
+                    setExchanging(false);
+                  }
+                },
+              }),
           auto_select: false,
           cancel_on_tap_outside: true,
         });
@@ -112,7 +145,7 @@ export default function LoginScreen({ onSuccess }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [clientId, onSuccess, resolved]);
+  }, [clientId, onSuccess, resolved, useRedirectFlow, loginUri]);
 
   const isWide = useIsWide();
 
