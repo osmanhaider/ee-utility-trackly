@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import UploadTab from "./components/UploadTab";
 import BillsTab from "./components/BillsTab";
 import AnalyticsTab from "./components/AnalyticsTab";
@@ -45,6 +46,14 @@ export default function App() {
   );
   const [me, setMe] = useState<User | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
+  const profileBtnRef = useRef<HTMLButtonElement | null>(null);
+  // The dropdown lives in a React Portal because the sticky <header>
+  // has both `overflow-x: auto` and `backdrop-filter`, which together
+  // create a containing block + clip context that hides any
+  // absolutely-positioned descendants extending below the header
+  // (the menu was invisible on mobile). Portalling to <body> escapes
+  // both, and we anchor to the trigger via getBoundingClientRect.
+  const [profileRect, setProfileRect] = useState<DOMRect | null>(null);
   const isMobile = useIsMobile();
 
   const refresh = () => setRefreshKey((k) => k + 1);
@@ -110,6 +119,29 @@ export default function App() {
     setProfileOpen(false);
     setAuthState("required");
   };
+
+  // Track the trigger button's viewport rect while the menu is open so
+  // the portalled dropdown follows resize / horizontal nav-scroll / a
+  // softkeyboard popping in. Closes on Escape.
+  useLayoutEffect(() => {
+    if (!profileOpen) return;
+    const update = () => {
+      const el = profileBtnRef.current;
+      setProfileRect(el ? el.getBoundingClientRect() : null);
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setProfileOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [profileOpen]);
 
   if (authState === "loading") {
     return (
@@ -247,6 +279,7 @@ export default function App() {
           {me && (
             <div style={{ position: "relative", marginLeft: isMobile ? 4 : 8, flexShrink: 0 }}>
               <button
+                ref={profileBtnRef}
                 type="button"
                 onClick={() => setProfileOpen(open => !open)}
                 title={me.email ?? me.name ?? "Profile"}
@@ -306,7 +339,7 @@ export default function App() {
                   </span>
                 )}
               </button>
-              {profileOpen && (
+              {profileOpen && profileRect && createPortal(
                 <>
                   <button
                     aria-label="Close profile menu"
@@ -318,18 +351,25 @@ export default function App() {
                       border: "none",
                       padding: 0,
                       cursor: "default",
-                      zIndex: 29,
+                      zIndex: 1000,
                     }}
                   />
                   <div
                     role="menu"
                     className="slide-up"
                     style={{
-                      position: "absolute",
-                      right: 0,
-                      top: "calc(100% + 10px)",
-                      zIndex: 30,
+                      position: "fixed",
+                      // Anchor to the bottom-right of the avatar trigger;
+                      // clamp to keep the menu fully on-screen on narrow
+                      // viewports.
+                      top: Math.min(
+                        profileRect.bottom + 10,
+                        window.innerHeight - 120,
+                      ),
+                      right: Math.max(8, window.innerWidth - profileRect.right),
+                      zIndex: 1001,
                       minWidth: isMobile ? 220 : 240,
+                      maxWidth: "calc(100vw - 16px)",
                       background: "var(--surface-1)",
                       border: "1px solid var(--border)",
                       borderRadius: 12,
@@ -368,7 +408,8 @@ export default function App() {
                       Sign out
                     </button>
                   </div>
-                </>
+                </>,
+                document.body,
               )}
             </div>
           )}
