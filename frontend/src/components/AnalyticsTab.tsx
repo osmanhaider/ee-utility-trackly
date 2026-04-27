@@ -146,9 +146,21 @@ function PctBadge({ v, label }: { v: number | null; label: string }) {
 
 function StatCard({ label, value, sub, trend }: { label: string; value: string; sub?: string; trend?: "up" | "down" | "flat" }) {
   return (
-    <div style={{ background: "var(--surface-1)", border: "1px solid var(--border)", borderRadius: 12, padding: "20px 24px" }}>
+    <div
+      className="lift"
+      style={{
+        background: "var(--surface-1)",
+        border: "1px solid var(--border)",
+        borderRadius: 12,
+        padding: "18px 20px",
+        minHeight: 126,
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "space-between",
+      }}
+    >
       <div style={{ fontSize: 12, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>{label}</div>
-      <div style={{ fontSize: 28, fontWeight: 700, color: "var(--text-1)" }}>{value}</div>
+      <div style={{ fontSize: 26, fontWeight: 700, color: "var(--text-1)", lineHeight: 1.05 }}>{value}</div>
       {sub && (
         <div style={{ fontSize: 12, color: "var(--text-2)", marginTop: 4, display: "flex", alignItems: "center", gap: 4 }}>
           {trend === "up" && <TrendingUp size={12} color="var(--danger)" />}
@@ -167,12 +179,23 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 
 function ChartCard({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
-    <div style={{ background: "var(--surface-1)", border: "1px solid var(--border)", borderRadius: 12, padding: 24 }}>
-      <div style={{ marginBottom: 20 }}>
+    <div
+      className="lift"
+      style={{
+        background: "var(--surface-1)",
+        border: "1px solid var(--border)",
+        borderRadius: 12,
+        padding: 24,
+        minHeight: "100%",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      <div style={{ marginBottom: 20, minHeight: subtitle ? 48 : 24 }}>
         <div style={{ fontSize: 15, fontWeight: 600, color: "var(--text-1)" }}>{title}</div>
         {subtitle && <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 4 }}>{subtitle}</div>}
       </div>
-      {children}
+      <div style={{ flex: 1, minHeight: 0 }}>{children}</div>
     </div>
   );
 }
@@ -492,7 +515,23 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
   }
   const liStackData = Object.values(liStackRows).sort((a, b) => String(a.month).localeCompare(String(b.month)));
 
-  const grid2 = { display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(340px, 1fr))", gap: isMobile ? 12 : 20 };
+  const dashboardGrid: React.CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: isMobile ? "1fr" : "repeat(12, minmax(0, 1fr))",
+    gap: isMobile ? 12 : 20,
+    alignItems: "stretch",
+  };
+  const halfCard: React.CSSProperties = { gridColumn: isMobile ? "1 / -1" : "span 6" };
+  const fullCard: React.CSSProperties = { gridColumn: "1 / -1" };
+  const kpiGrid: React.CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: isMobile
+      ? "repeat(auto-fit, minmax(150px, 1fr))"
+      : "repeat(4, minmax(0, 1fr))",
+    gap: isMobile ? 12 : 16,
+    marginBottom: 8,
+    alignItems: "stretch",
+  };
   const chartH = (base: number) => isMobile ? Math.round(base * 0.75) : base;
 
   return (
@@ -568,7 +607,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
       <div ref={dashboardRef}>
 
       {/* KPI Cards */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 16, marginBottom: 8 }}>
+      <div style={kpiGrid}>
         <StatCard label="Total Spend" value={`€${totalSpend.toFixed(2)}`} />
         <StatCard
           label="Latest Month"
@@ -594,8 +633,8 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
 
       {/* 1. Total spend over time */}
       <SectionTitle>📈 1. Monthly Spending Trend &amp; Rolling Average</SectionTitle>
-      <div style={grid2}>
-        <ChartCard title="Total Monthly Spend — Line" subtitle="Clean line chart of monthly total with labeled points">
+      <div style={dashboardGrid}>
+        <div style={halfCard}><ChartCard title="Total Monthly Spend — Line" subtitle="Clean line chart of monthly total with labeled points">
           <ResponsiveContainer width="100%" height={chartH(260)}>
             <LineChart data={data.monthly_total} margin={{ top: 20, right: 20, left: 0, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
@@ -629,9 +668,9 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               />
             </LineChart>
           </ResponsiveContainer>
-        </ChartCard>
+        </ChartCard></div>
 
-        <ChartCard title="Total Monthly Spend — Area" subtitle="Filled area view · Dashed line = 3-month rolling average">
+        <div style={halfCard}><ChartCard title="Total Monthly Spend — Area" subtitle="Filled area view · Dashed line = 3-month rolling average">
           <ResponsiveContainer width="100%" height={chartH(260)}>
             <AreaChart data={data.monthly_total}>
               <defs>
@@ -649,16 +688,16 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               <Line type="monotone" dataKey="rolling_avg_3m" stroke="var(--warning)" strokeDasharray="5 5" name="3-Month Avg" strokeWidth={2} dot={false} />
             </AreaChart>
           </ResponsiveContainer>
-        </ChartCard>
+        </ChartCard></div>
       </div>
 
       {/* 2. MoM & YoY % Change */}
       {(momRows.length > 0 || yoyRows.length > 0) && (
         <>
           <SectionTitle>📉 2. Month-over-Month &amp; Year-over-Year % Change</SectionTitle>
-          <div style={grid2}>
+          <div style={dashboardGrid}>
             {momRows.length > 0 && (
-              <ChartCard title="Month-over-Month Change" subtitle="Green = cheaper than previous month · Red = more expensive">
+              <div style={halfCard}><ChartCard title="Month-over-Month Change" subtitle="Green = cheaper than previous month · Red = more expensive">
                 <ResponsiveContainer width="100%" height={chartH(260)}>
                   <BarChart data={momRows}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
@@ -672,11 +711,11 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
-              </ChartCard>
+              </ChartCard></div>
             )}
 
             {yoyRows.length > 0 && (
-              <ChartCard title="Year-over-Year Change" subtitle="Green = cheaper than same month last year · Red = more expensive">
+              <div style={halfCard}><ChartCard title="Year-over-Year Change" subtitle="Green = cheaper than same month last year · Red = more expensive">
                 <ResponsiveContainer width="100%" height={chartH(260)}>
                   <BarChart data={yoyRows}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
@@ -690,7 +729,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
-              </ChartCard>
+              </ChartCard></div>
             )}
           </div>
 
@@ -732,8 +771,8 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
 
       {/* 3. Breakdown by type */}
       <SectionTitle>🗂️ 3. Spend Breakdown by Utility Type</SectionTitle>
-      <div style={grid2}>
-        <ChartCard title="Monthly Stacked by Type" subtitle="See which utilities drive costs each month">
+      <div style={dashboardGrid}>
+        <div style={halfCard}><ChartCard title="Monthly Stacked by Type" subtitle="See which utilities drive costs each month">
           <ResponsiveContainer width="100%" height={chartH(320)}>
             <BarChart data={stackedRows} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
@@ -746,9 +785,9 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               ))}
             </BarChart>
           </ResponsiveContainer>
-        </ChartCard>
+        </ChartCard></div>
 
-        <ChartCard title="Share of Total Spend" subtitle="Cumulative share per category">
+        <div style={halfCard}><ChartCard title="Share of Total Spend" subtitle="Cumulative share per category">
           <ResponsiveContainer width="100%" height={chartH(320)}>
             <PieChart>
               <Pie
@@ -790,13 +829,13 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               />
             </PieChart>
           </ResponsiveContainer>
-        </ChartCard>
+        </ChartCard></div>
       </div>
 
       {/* 4. Seasonal patterns */}
       <SectionTitle>🌡️ 4. Seasonal Cost Patterns</SectionTitle>
-      <div style={grid2}>
-        <ChartCard title="Average Bill by Calendar Month" subtitle="Reveals heating spikes in winter, A/C in summer">
+      <div style={dashboardGrid}>
+        <div style={halfCard}><ChartCard title="Average Bill by Calendar Month" subtitle="Reveals heating spikes in winter, A/C in summer">
           <ResponsiveContainer width="100%" height={chartH(320)}>
             <BarChart data={seasonalRows} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
@@ -809,9 +848,9 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               ))}
             </BarChart>
           </ResponsiveContainer>
-        </ChartCard>
+        </ChartCard></div>
 
-        <ChartCard title="Seasonal Radar Profile" subtitle="Shape = energy use pattern across 4 seasons">
+        <div style={halfCard}><ChartCard title="Seasonal Radar Profile" subtitle="Shape = energy use pattern across 4 seasons">
           <ResponsiveContainer width="100%" height={chartH(320)}>
             <RadarChart data={radarData} cx="50%" cy="45%" outerRadius={75}>
               <PolarGrid stroke="var(--border)" />
@@ -823,27 +862,31 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               <Tooltip content={<RichTooltip unit="€" />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
             </RadarChart>
           </ResponsiveContainer>
-        </ChartCard>
+        </ChartCard></div>
       </div>
 
       {/* 5. Year-over-year annual view */}
       {annualRows.length > 1 && (
         <>
           <SectionTitle>📅 5. Annual Spend Comparison</SectionTitle>
-          <ChartCard title="Annual Spend by Category" subtitle="Compare total utility cost across years">
-            <ResponsiveContainer width="100%" height={chartH(320)}>
-              <BarChart data={annualRows} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis dataKey="year" tick={{ fill: "var(--text-3)", fontSize: 12 }} />
-                <YAxis tick={{ fill: "var(--text-3)", fontSize: 12 }} tickFormatter={v => `€${v}`} />
-                <Tooltip content={<RichTooltip unit="€" />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
-                <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
-                {types.map((t, i) => (
-                  <Bar key={t} dataKey={t} fill={colorFor(t, i)} name={t} />
-                ))}
-              </BarChart>
-            </ResponsiveContainer>
-          </ChartCard>
+          <div style={dashboardGrid}>
+            <div style={fullCard}>
+              <ChartCard title="Annual Spend by Category" subtitle="Compare total utility cost across years">
+                <ResponsiveContainer width="100%" height={chartH(320)}>
+                  <BarChart data={annualRows} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                    <XAxis dataKey="year" tick={{ fill: "var(--text-3)", fontSize: 12 }} />
+                    <YAxis tick={{ fill: "var(--text-3)", fontSize: 12 }} tickFormatter={v => `€${v}`} />
+                    <Tooltip content={<RichTooltip unit="€" />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
+                    <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
+                    {types.map((t, i) => (
+                      <Bar key={t} dataKey={t} fill={colorFor(t, i)} name={t} />
+                    ))}
+                  </BarChart>
+                </ResponsiveContainer>
+              </ChartCard>
+            </div>
+          </div>
         </>
       )}
 
@@ -851,38 +894,46 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
       {topProviders.length > 0 && (
         <>
           <SectionTitle>🏢 6. Spend by Provider</SectionTitle>
-          <ChartCard title="Top Providers by Total Spend" subtitle="Identify your most expensive suppliers">
-            <ResponsiveContainer width="100%" height={chartH(220)}>
-              <BarChart data={topProviders} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
-                <XAxis type="number" tick={{ fill: "var(--text-3)", fontSize: 12 }} tickFormatter={v => `€${v}`} />
-                <YAxis type="category" dataKey="provider" tick={{ fill: "var(--text-2)", fontSize: isMobile ? 10 : 12 }} width={isMobile ? 80 : 120} />
-                <Tooltip content={<RichTooltip unit="€" />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
-                <Bar dataKey="total_eur" fill="#2563eb" name="Total Spend" radius={[0, 4, 4, 0]}>
-                  {topProviders.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </ChartCard>
+          <div style={dashboardGrid}>
+            <div style={fullCard}>
+              <ChartCard title="Top Providers by Total Spend" subtitle="Identify your most expensive suppliers">
+                <ResponsiveContainer width="100%" height={chartH(260)}>
+                  <BarChart data={topProviders} layout="vertical">
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
+                    <XAxis type="number" tick={{ fill: "var(--text-3)", fontSize: 12 }} tickFormatter={v => `€${v}`} />
+                    <YAxis type="category" dataKey="provider" tick={{ fill: "var(--text-2)", fontSize: isMobile ? 10 : 12 }} width={isMobile ? 80 : 140} />
+                    <Tooltip content={<RichTooltip unit="€" />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
+                    <Bar dataKey="total_eur" fill="#2563eb" name="Total Spend" radius={[0, 4, 4, 0]}>
+                      {topProviders.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </ChartCard>
+            </div>
+          </div>
         </>
       )}
 
       {/* 7. Per-type trend lines */}
       <SectionTitle>📊 7. Per-Utility Trend Lines</SectionTitle>
-      <ChartCard title="Each Utility Type Over Time" subtitle="A sudden spike = price change or leak">
-        <ResponsiveContainer width="100%" height={chartH(340)}>
-          <LineChart data={stackedRows} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-            <XAxis dataKey="month" tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={fmtMonthShort} interval="preserveStartEnd" minTickGap={24} />
-            <YAxis tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={v => `€${v}`} />
-            <Tooltip content={<RichTooltip />} />
-            <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
-            {types.map((t, i) => (
-              <Line key={t} type="monotone" dataKey={t} stroke={colorFor(t, i)} name={t} strokeWidth={2} dot={{ r: 3 }} />
-            ))}
-          </LineChart>
-        </ResponsiveContainer>
-      </ChartCard>
+      <div style={dashboardGrid}>
+        <div style={fullCard}>
+          <ChartCard title="Each Utility Type Over Time" subtitle="A sudden spike = price change or leak">
+            <ResponsiveContainer width="100%" height={chartH(340)}>
+              <LineChart data={stackedRows} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                <XAxis dataKey="month" tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={fmtMonthShort} interval="preserveStartEnd" minTickGap={24} />
+                <YAxis tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={v => `€${v}`} />
+                <Tooltip content={<RichTooltip />} />
+                <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
+                {types.map((t, i) => (
+                  <Line key={t} type="monotone" dataKey={t} stroke={colorFor(t, i)} name={t} strokeWidth={2} dot={{ r: 3 }} />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </ChartCard>
+        </div>
+      </div>
 
       {/* 8. Summary stats table */}
       <SectionTitle>🔢 8. Summary Statistics by Type</SectionTitle>
@@ -1094,23 +1145,25 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
       {annualTotals.length > 0 && (
         <>
           <SectionTitle>🧮 13. Total Spend by Year</SectionTitle>
-          <div style={grid2}>
-            <ChartCard
-              title="Annual Total Spend"
-              subtitle="One bar per calendar year — all utility types combined"
-            >
-              <ResponsiveContainer width="100%" height={chartH(280)}>
-                <BarChart data={annualTotals} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                  <XAxis dataKey="year" tick={{ fill: "var(--text-2)", fontSize: 12 }} />
-                  <YAxis tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={v => `€${v}`} />
-                  <Tooltip content={<RichTooltip unit="€" showTotal={false} maxItems={2} />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
-                  <Bar dataKey="total_eur" name="Total spend" fill="var(--accent)" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </ChartCard>
+          <div style={dashboardGrid}>
+            <div style={halfCard}>
+              <ChartCard
+                title="Annual Total Spend"
+                subtitle="One bar per calendar year — all utility types combined"
+              >
+                <ResponsiveContainer width="100%" height={chartH(280)}>
+                  <BarChart data={annualTotals} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                    <XAxis dataKey="year" tick={{ fill: "var(--text-2)", fontSize: 12 }} />
+                    <YAxis tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={v => `€${v}`} />
+                    <Tooltip content={<RichTooltip unit="€" showTotal={false} maxItems={2} />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
+                    <Bar dataKey="total_eur" name="Total spend" fill="var(--accent)" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </ChartCard>
+            </div>
 
-            <div style={{ background: "var(--surface-1)", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
+            <div style={{ ...halfCard, background: "var(--surface-1)", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
               <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--border)", fontSize: 14, fontWeight: 600, color: "var(--text-1)" }}>
                 Yearly Rollup
               </div>
