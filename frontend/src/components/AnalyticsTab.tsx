@@ -50,6 +50,16 @@ function colorFor(t: string, i = 0) {
   return COLORS[t] ?? PALETTE[i % PALETTE.length];
 }
 
+const legendStyle = {
+  fontSize: 11,
+  paddingTop: 8,
+  color: "var(--text-2)",
+} as const;
+
+function legendFormatter(value: string) {
+  return <span style={{ color: "var(--text-2)" }}>{labelFor(value)}</span>;
+}
+
 // "2025-01" → "Jan '25"
 function fmtMonthShort(m: unknown): string {
   const s = String(m ?? "");
@@ -643,7 +653,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               <XAxis dataKey="month" tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={fmtMonthShort} interval="preserveStartEnd" minTickGap={24} />
               <YAxis tick={{ fill: "var(--text-3)", fontSize: 12 }} tickFormatter={v => `€${v}`} />
               <Tooltip content={<RichTooltip unit="€" />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
-              <Legend />
+              <Legend wrapperStyle={legendStyle} formatter={legendFormatter} />
               <Line
                 type="monotone"
                 dataKey="total_eur"
@@ -685,7 +695,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               <XAxis dataKey="month" tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={fmtMonthShort} interval="preserveStartEnd" minTickGap={24} />
               <YAxis tick={{ fill: "var(--text-3)", fontSize: 12 }} tickFormatter={v => `€${v}`} />
               <Tooltip content={<RichTooltip unit="€" />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
-              <Legend />
+              <Legend wrapperStyle={legendStyle} formatter={legendFormatter} />
               <Area type="monotone" dataKey="total_eur" stroke="#2563eb" fill="url(#totalGrad)" name="Monthly Total" strokeWidth={2} />
               <Line type="monotone" dataKey="rolling_avg_3m" stroke="var(--warning)" strokeDasharray="5 5" name="3-Month Avg" strokeWidth={2} dot={false} />
             </AreaChart>
@@ -781,7 +791,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               <XAxis dataKey="month" tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={fmtMonthShort} interval="preserveStartEnd" minTickGap={24} />
               <YAxis tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={v => `€${v}`} />
               <Tooltip content={<RichTooltip unit="€" maxItems={7} />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
-              <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} iconSize={10} />
+              <Legend wrapperStyle={legendStyle} iconSize={10} formatter={legendFormatter} />
               {types.map((t, i) => (
                 <Bar key={t} dataKey={t} stackId="a" fill={colorFor(t, i)} name={t} />
               ))}
@@ -826,8 +836,8 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               <Legend
                 verticalAlign="bottom"
                 iconType="circle"
-                wrapperStyle={{ fontSize: 12, paddingTop: 8 }}
-                formatter={(value: string) => <span style={{ color: "var(--text-1)" }}>{labelFor(value)}</span>}
+                wrapperStyle={{ ...legendStyle, fontSize: 12 }}
+                formatter={legendFormatter}
               />
             </PieChart>
           </ResponsiveContainer>
@@ -844,7 +854,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               <XAxis dataKey="month" tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={fmtMonthShort} interval="preserveStartEnd" minTickGap={24} />
               <YAxis tick={{ fill: "var(--text-3)", fontSize: 12 }} tickFormatter={v => `€${v}`} />
               <Tooltip content={<RichTooltip unit="€" />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
-              <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
+              <Legend wrapperStyle={legendStyle} formatter={legendFormatter} />
               {types.map((t, i) => (
                 <Bar key={t} dataKey={t} fill={colorFor(t, i)} name={t} />
               ))}
@@ -860,7 +870,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               {radarTypes.map((t, i) => (
                 <Radar key={t} name={t} dataKey={t} stroke={colorFor(t, i)} fill={colorFor(t, i)} fillOpacity={0.15} />
               ))}
-              <Legend wrapperStyle={{ fontSize: 11, paddingTop: 12 }} />
+              <Legend wrapperStyle={{ ...legendStyle, paddingTop: 12 }} formatter={legendFormatter} />
               <Tooltip content={<RichTooltip unit="€" />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
             </RadarChart>
           </ResponsiveContainer>
@@ -880,7 +890,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
                     <XAxis dataKey="year" tick={{ fill: "var(--text-3)", fontSize: 12 }} />
                     <YAxis tick={{ fill: "var(--text-3)", fontSize: 12 }} tickFormatter={v => `€${v}`} />
                     <Tooltip content={<RichTooltip unit="€" />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
-                    <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
+                    <Legend wrapperStyle={legendStyle} formatter={legendFormatter} />
                     {types.map((t, i) => (
                       <Bar key={t} dataKey={t} fill={colorFor(t, i)} name={t} />
                     ))}
@@ -927,7 +937,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
                 <XAxis dataKey="month" tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={fmtMonthShort} interval="preserveStartEnd" minTickGap={24} />
                 <YAxis tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={v => `€${v}`} />
                 <Tooltip content={<RichTooltip />} />
-                <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
+            <Legend wrapperStyle={legendStyle} formatter={legendFormatter} />
                 {types.map((t, i) => (
                   <Line key={t} type="monotone" dataKey={t} stroke={colorFor(t, i)} name={t} strokeWidth={2} dot={{ r: 3 }} />
                 ))}
@@ -987,7 +997,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
                 <XAxis dataKey="month" tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={fmtMonthShort} interval="preserveStartEnd" minTickGap={24} />
                 <YAxis tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={v => `€${Number(v).toFixed(2)}`} />
                 <Tooltip content={<RichTooltip unit="€" showTotal={false} maxItems={8} />} />
-                <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} iconSize={10} />
+                <Legend wrapperStyle={legendStyle} iconSize={10} formatter={legendFormatter} />
                 {priceVaryingLabels.map((label, i) => (
                   <Line key={label} type="monotone" dataKey={label} stroke={PALETTE[i % PALETTE.length]}
                     name={label} strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls />
@@ -1013,7 +1023,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
                   <XAxis dataKey="month" tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={fmtMonthShort} interval="preserveStartEnd" minTickGap={24} />
                   <YAxis tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={v => `€${v}`} />
                   <Tooltip content={<RichTooltip unit="€" showTotal maxItems={6} />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
-                  <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} iconSize={10} />
+                  <Legend wrapperStyle={legendStyle} iconSize={10} formatter={legendFormatter} />
                   {liStackLabels.map((label, i) => (
                     <Bar key={label} dataKey={label} stackId="a"
                       fill={label === "Other" ? "#475569" : PALETTE[i % PALETTE.length]}
@@ -1041,7 +1051,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
                   <XAxis dataKey="xLabel" tick={{ fill: "var(--text-2)", fontSize: 10 }} interval={0} angle={-35} textAnchor="end" height={100} />
                   <YAxis tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={v => `€${v}`} />
                   <Tooltip content={<RichTooltip unit="€" showTotal={false} maxItems={4} />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
-                  <Legend />
+                  <Legend wrapperStyle={legendStyle} formatter={legendFormatter} />
                   <Bar dataKey="priceEffect" name="Price effect (€)" fill="var(--danger)" radius={[3, 3, 0, 0]} />
                   <Bar dataKey="volEffect" name="Volume effect (€)" fill="#2563eb" radius={[3, 3, 0, 0]} />
                 </BarChart>
