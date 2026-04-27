@@ -433,6 +433,9 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
   const lit = data.line_item_trends ?? [];
   const liMonths = Array.from(new Set(lit.map(r => r.month))).sort();
   const liLabels = Array.from(new Set(lit.map(r => r.description_en))).sort();
+  // Latest two months are used by both card 11 (decomposition) and card 12
+  // (side-by-side line item comparison).
+  const [prevMonthLabel, latestMonthLabel] = liMonths.slice(-2);
 
   // Unit-price trend per line item across months
   const unitPriceByLabel: Record<string, Record<string, number | string>> = {};
@@ -443,8 +446,9 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
   }
   const unitPriceRows = Object.values(unitPriceByLabel).sort((a, b) => String(a.month).localeCompare(String(b.month)));
 
-  // Price vs Consumption decomposition for metered items (have a unit_price and quantity)
-  // For each consecutive month pair, compute: price effect + volume effect
+  // Price vs Consumption decomposition for metered items (have a unit_price and quantity).
+  // Only compare the latest two months; older month-over-month changes are less
+  // actionable and made the chart noisy.
   const meteredLabels = Array.from(new Set(
     lit.filter(r => r.unit_price != null && r.quantity != null && r.quantity > 0).map(r => r.description_en)
   ));
@@ -452,30 +456,28 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
   for (const label of meteredLabels) {
     const series = lit.filter(r => r.description_en === label && r.unit_price != null && r.quantity != null)
                       .sort((a, b) => a.month.localeCompare(b.month));
-    for (let i = 1; i < series.length; i++) {
-      const prev = series[i - 1], cur = series[i];
-      if (!prev.unit_price || !cur.unit_price || !prev.quantity || !cur.quantity) continue;
-      const priceEff = parseFloat(((cur.unit_price - prev.unit_price) * prev.quantity).toFixed(2));
-      const volEff   = parseFloat(((cur.quantity  - prev.quantity)  * prev.unit_price).toFixed(2));
-      decompAll.push({
-        label,
-        month: cur.month,
-        priceEffect: priceEff,
-        volEffect: volEff,
-        total: parseFloat((cur.amount_eur - prev.amount_eur).toFixed(2)),
-        xLabel: `${label} · ${fmtMonthShort(cur.month)}`,
-      });
-    }
+    const prev = series.find(r => r.month === prevMonthLabel);
+    const cur = series.find(r => r.month === latestMonthLabel);
+    if (!prev || !cur || !prev.unit_price || !cur.unit_price || !prev.quantity || !cur.quantity) continue;
+    const priceEff = parseFloat(((cur.unit_price - prev.unit_price) * prev.quantity).toFixed(2));
+    const volEff   = parseFloat(((cur.quantity  - prev.quantity)  * prev.unit_price).toFixed(2));
+    decompAll.push({
+      label,
+      month: cur.month,
+      priceEffect: priceEff,
+      volEffect: volEff,
+      total: parseFloat((cur.amount_eur - prev.amount_eur).toFixed(2)),
+      xLabel: label,
+    });
   }
   // Only show entries where at least one effect is meaningful; rank by
-  // magnitude so the most interesting bars appear first. Cap at 15.
+  // magnitude so the most interesting bars appear first.
   const decompRows = decompAll
     .filter(r => Math.abs(r.priceEffect) + Math.abs(r.volEffect) > 0.5)
     .sort((a, b) => (Math.abs(b.priceEffect) + Math.abs(b.volEffect)) - (Math.abs(a.priceEffect) + Math.abs(a.volEffect)))
-    .slice(0, 15);
+    .slice(0, 12);
 
   // Month-vs-month comparison table: last two months side by side
-  const [prevMonthLabel, latestMonthLabel] = liMonths.slice(-2);
   const comparisonItems = liLabels.map(label => {
     const prev = lit.find(r => r.month === prevMonthLabel && r.description_en === label);
     const curr = lit.find(r => r.month === latestMonthLabel && r.description_en === label);
@@ -1042,7 +1044,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
           <SectionTitle>⚖️ 11. Price vs Consumption Decomposition</SectionTitle>
           <ChartCard
             title="What drove the cost change? Price or usage?"
-            subtitle={`Top ${decompRows.length} month-over-month moves · Red = price effect · Blue = volume effect`}
+            subtitle={`${prevMonthLabel} → ${latestMonthLabel} only · Red = price effect · Blue = volume effect`}
           >
             <div style={{ overflowX: "auto" }}>
               <ResponsiveContainer width={Math.max(600, decompRows.length * 100)} height={360}>
