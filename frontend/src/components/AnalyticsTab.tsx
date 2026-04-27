@@ -705,7 +705,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
               <XAxis dataKey="month" tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={fmtMonthShort} interval="preserveStartEnd" minTickGap={24} />
               <YAxis tick={{ fill: "var(--text-3)", fontSize: 12 }} tickFormatter={v => `€${v}`} />
-              <Tooltip content={<RichTooltip unit="€" />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
+              <Tooltip content={<RichTooltip unit="€" showTotal={false} />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
               <Legend wrapperStyle={legendStyle} formatter={legendFormatter} />
               <Line
                 type="monotone"
@@ -747,7 +747,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
               <XAxis dataKey="month" tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={fmtMonthShort} interval="preserveStartEnd" minTickGap={24} />
               <YAxis tick={{ fill: "var(--text-3)", fontSize: 12 }} tickFormatter={v => `€${v}`} />
-              <Tooltip content={<RichTooltip unit="€" />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
+              <Tooltip content={<RichTooltip unit="€" showTotal={false} />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
               <Legend wrapperStyle={legendStyle} formatter={legendFormatter} />
               <Area type="monotone" dataKey="total_eur" stroke="#2563eb" fill="url(#totalGrad)" name="Monthly Total" strokeWidth={2} />
               <Line type="monotone" dataKey="rolling_avg_3m" stroke="var(--warning)" strokeDasharray="5 5" name="3-Month Avg" strokeWidth={2} dot={false} />
@@ -927,7 +927,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
                 <Radar key={t} name={t} dataKey={t} stroke={colorFor(t, i)} fill={colorFor(t, i)} fillOpacity={0.15} />
               ))}
               <Legend wrapperStyle={{ ...legendStyle, paddingTop: 12 }} formatter={legendFormatter} />
-              <Tooltip content={<RichTooltip unit="€" />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
+              <Tooltip content={<RichTooltip unit="€" showTotal={false} />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
             </RadarChart>
           </ResponsiveContainer>
         </ChartCard></div>
