@@ -1048,6 +1048,33 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
         key=lambda r: (r["year"], r["utility_type"]),
     )
 
+    annual_rollup: dict[str, dict] = {}
+    for meta in bill_meta.values():
+        amount = meta["amount_eur"]
+        year = meta["year"]
+        if amount is None or not year:
+            continue
+        row = annual_rollup.setdefault(
+            year,
+            {"year": year, "bill_count": 0, "total_eur": 0.0},
+        )
+        # Distinct bill-level rollup: one bill contributes exactly once, even
+        # when its line items are split across multiple utility categories for
+        # `by_year`.
+        row["bill_count"] += 1
+        row["total_eur"] += float(amount)
+    annual_total = [
+        {
+            "year": year,
+            "bill_count": row["bill_count"],
+            "total_eur": round(row["total_eur"], 2),
+            "avg_bill_eur": round(row["total_eur"] / row["bill_count"], 2)
+            if row["bill_count"]
+            else 0.0,
+        }
+        for year, row in sorted(annual_rollup.items())
+    ]
+
     seasonal = sorted(
         [{"month_num": mn, "utility_type": t,
           "avg_eur": round(sum(amts) / len(amts), 2) if amts else 0.0}
@@ -1146,6 +1173,7 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
         "by_type": by_type,
         "by_month": by_month,
         "by_year": by_year,
+        "annual_total": annual_total,
         "seasonal": seasonal,
         "by_provider": by_provider,
         "monthly_total": monthly_total,

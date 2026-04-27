@@ -407,27 +407,9 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
     annualByType[r.year][r.utility_type] = parseFloat(r.total_eur.toFixed(2));
   }
   const annualRows = Object.values(annualByType).sort((a, b) => String(a.year).localeCompare(String(b.year)));
-  const annualTotalRows = data.by_year
-    .reduce((acc, row) => {
-      const existing = acc.get(row.year) ?? {
-        year: row.year,
-        total_eur: 0,
-        bill_count: 0,
-      };
-      existing.total_eur += row.total_eur;
-      existing.bill_count += row.bill_count;
-      acc.set(row.year, existing);
-      return acc;
-    }, new Map<string, { year: string; total_eur: number; bill_count: number }>());
-  const annualTotals = Array.from(annualTotalRows.values())
-    .map(row => ({
-      ...row,
-      total_eur: parseFloat(row.total_eur.toFixed(2)),
-      avg_bill_eur: row.bill_count > 0
-        ? parseFloat((row.total_eur / row.bill_count).toFixed(2))
-        : 0,
-    }))
-    .sort((a, b) => a.year.localeCompare(b.year));
+  const annualTotals = [...(data.annual_total ?? [])].sort((a, b) =>
+    a.year.localeCompare(b.year)
+  );
 
   // ── Line-item analytics ─────────────────────────────────────────────────
   const lit = data.line_item_trends ?? [];

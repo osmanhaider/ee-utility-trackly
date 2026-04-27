@@ -88,6 +88,7 @@ export interface AnalyticsSummary {
   by_type: TypeStat[];
   by_month: MonthTypeStat[];
   by_year: YearStat[];
+  annual_total: AnnualTotal[];
   seasonal: SeasonalStat[];
   by_provider: ProviderStat[];
   monthly_total: MonthlyTotal[];
@@ -136,6 +137,13 @@ export interface YearStat {
   total_eur: number;
   avg_monthly_eur: number;
   bill_count: number;
+}
+
+export interface AnnualTotal {
+  year: string;
+  bill_count: number;
+  total_eur: number;
+  avg_bill_eur: number;
 }
 
 export interface SeasonalStat {
