@@ -151,8 +151,10 @@ export interface AnnualTotal {
 export interface SeasonalStat {
   month_num: string;
   avg_eur: number;
-  total_eur: number;
-  bill_count: number;
+  /** Optional — set by newer backends so the radar can compute weighted
+   *  averages. Older payloads (deploy lag) won't include these. */
+  total_eur?: number;
+  bill_count?: number;
   utility_type: string;
 }
 

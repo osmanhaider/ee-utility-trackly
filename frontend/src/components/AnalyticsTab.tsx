@@ -461,18 +461,30 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
     .map(r => ({ month: r.month, delta: r.yoy_delta_pct!, eur: r.yoy_delta_eur! }));
 
   const radarTypes = types.slice(0, 5);
-  // Use weighted averages (Σtotal / Σcount) so the season's value reflects
-  // the true per-bill average across the season's months instead of
-  // averaging averages (which gave equal weight to a 1-bill month and a
-  // 6-bill month).
+  // Prefer weighted averages (Σtotal / Σcount) so the season's value
+  // reflects the true per-bill average across the season's months
+  // instead of averaging averages. Fall back to averaging avg_eur when
+  // total_eur/bill_count aren't on the payload (e.g. during a backend
+  // deploy lag against an older response shape).
   const radarData = ["Winter", "Spring", "Summer", "Autumn"].map((season, si) => {
     const entry: Record<string, string | number> = { season };
     const months = [[12, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]][si];
     for (const t of radarTypes) {
       const relevant = data.seasonal.filter(r => months.includes(parseInt(r.month_num)) && r.utility_type === t);
-      const totalEur = relevant.reduce((s, r) => s + (r.total_eur ?? 0), 0);
-      const billCount = relevant.reduce((s, r) => s + (r.bill_count ?? 0), 0);
-      entry[t] = billCount ? parseFloat((totalEur / billCount).toFixed(2)) : 0;
+      if (relevant.length === 0) {
+        entry[t] = 0;
+        continue;
+      }
+      const billCount = relevant.reduce((s, r) => s + (typeof r.bill_count === "number" ? r.bill_count : 0), 0);
+      if (billCount > 0) {
+        const totalEur = relevant.reduce((s, r) => s + (typeof r.total_eur === "number" ? r.total_eur : 0), 0);
+        entry[t] = parseFloat((totalEur / billCount).toFixed(2));
+      } else {
+        // Unweighted fallback for legacy payloads.
+        entry[t] = parseFloat(
+          (relevant.reduce((s, r) => s + r.avg_eur, 0) / relevant.length).toFixed(2),
+        );
+      }
     }
     return entry;
   });
