@@ -66,6 +66,16 @@ _EDITABLE_BILL_COLUMNS = frozenset({
     "is_private",
 })
 
+# Analytics can be expensive once raw_json line items grow. Cache for a short
+# window and clear on every bill mutation so navigation feels instant without
+# serving stale post-edit/delete data.
+_ANALYTICS_CACHE_TTL_SEC = int(os.environ.get("ANALYTICS_CACHE_TTL_SEC", 60))
+_analytics_cache: dict[tuple[str | None, bool], tuple[float, dict]] = {}
+
+
+def _clear_analytics_cache() -> None:
+    _analytics_cache.clear()
+
 
 async def init_db() -> None:
     async with _db() as db:
@@ -652,6 +662,7 @@ async def upload_bill(
             ))
         await db.commit()
 
+    _clear_analytics_cache()
     return {"id": bill_id, "parsed": parsed, "replaced": replaced}
 
 
@@ -753,6 +764,7 @@ async def update_bill(
         await db.commit()
     if affected == 0:
         raise HTTPException(404, "Bill not found")
+    _clear_analytics_cache()
     return {"status": "updated"}
 
 
@@ -769,6 +781,7 @@ async def delete_bill(bill_id: str, user_id: str = Depends(get_user_id)):
         await db.commit()
     if affected == 0:
         raise HTTPException(404, "Bill not found")
+    _clear_analytics_cache()
     return {"status": "deleted"}
 
 
@@ -1143,7 +1156,7 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
 @app.get("/api/analytics/summary")
 async def analytics_summary(user_id: str = Depends(get_user_id)):
     """Personal analytics: caller's bills, both private and public."""
-    return await _compute_analytics(user_id, public_only=False)
+    return await _get_cached_analytics(user_id, public_only=False)
 
 
 @app.get("/api/community/users")
@@ -1205,7 +1218,18 @@ async def community_analytics(
     _user_id: str = Depends(get_user_id),
 ):
     """Aggregate analytics across the whole community, or one user. Public bills only."""
-    return await _compute_analytics(target_user_id, public_only=True)
+    return await _get_cached_analytics(target_user_id, public_only=True)
+
+
+async def _get_cached_analytics(user_id_filter: str | None, public_only: bool) -> dict:
+    key = (user_id_filter, public_only)
+    now = time.time()
+    cached = _analytics_cache.get(key)
+    if cached and cached[0] > now:
+        return cached[1]
+    data = await _compute_analytics(user_id_filter, public_only)
+    _analytics_cache[key] = (now + _ANALYTICS_CACHE_TTL_SEC, data)
+    return data
 
 
 # ────────────────────────────────────────────────────────────────────────

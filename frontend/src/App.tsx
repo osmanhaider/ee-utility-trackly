@@ -36,6 +36,7 @@ export default function App() {
   useTheme();
 
   const [tab, setTab] = useState<Tab>(() => tabFromHash());
+  const [analyticsVisited, setAnalyticsVisited] = useState(() => tabFromHash() === "analytics");
   const [refreshKey, setRefreshKey] = useState(0);
   const [uploadsRunning, setUploadsRunning] = useState(false);
   // Lazy initial: skip the loading state entirely if there's no token to verify.
@@ -49,13 +50,18 @@ export default function App() {
   const refresh = () => setRefreshKey((k) => k + 1);
 
   useEffect(() => {
-    const onHashChange = () => setTab(tabFromHash());
+    const onHashChange = () => {
+      const next = tabFromHash();
+      if (next === "analytics") setAnalyticsVisited(true);
+      setTab(next);
+    };
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
   const navigateTab = (next: Tab) => {
     if (tab === next) return;
+    if (next === "analytics") setAnalyticsVisited(true);
     window.history.pushState(null, "", hashForTab(next));
     setTab(next);
   };
@@ -389,10 +395,18 @@ export default function App() {
               isActive={tab === "upload"}
             />
           </div>
-          {tab !== "upload" && (
+          {analyticsVisited && (
+            <div
+              style={{ display: tab === "analytics" ? "block" : "none" }}
+              aria-hidden={tab !== "analytics"}
+              className={tab === "analytics" ? "tab-content" : undefined}
+            >
+              <AnalyticsTab reloadKey={refreshKey} />
+            </div>
+          )}
+          {tab !== "upload" && tab !== "analytics" && (
             <div key={tab} className="tab-content">
               {tab === "bills" && <BillsTab onDataChange={refresh} />}
-              {tab === "analytics" && <AnalyticsTab reloadKey={refreshKey} />}
               {tab === "community" && <CommunityTab reloadKey={refreshKey} />}
               {tab === "settings" && <SettingsTab />}
               {tab === "help" && <HelpTab />}
