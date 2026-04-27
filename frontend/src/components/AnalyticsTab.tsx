@@ -372,6 +372,27 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
     annualByType[r.year][r.utility_type] = parseFloat(r.total_eur.toFixed(2));
   }
   const annualRows = Object.values(annualByType).sort((a, b) => String(a.year).localeCompare(String(b.year)));
+  const annualTotalRows = data.by_year
+    .reduce((acc, row) => {
+      const existing = acc.get(row.year) ?? {
+        year: row.year,
+        total_eur: 0,
+        bill_count: 0,
+      };
+      existing.total_eur += row.total_eur;
+      existing.bill_count += row.bill_count;
+      acc.set(row.year, existing);
+      return acc;
+    }, new Map<string, { year: string; total_eur: number; bill_count: number }>());
+  const annualTotals = Array.from(annualTotalRows.values())
+    .map(row => ({
+      ...row,
+      total_eur: parseFloat(row.total_eur.toFixed(2)),
+      avg_bill_eur: row.bill_count > 0
+        ? parseFloat((row.total_eur / row.bill_count).toFixed(2))
+        : 0,
+    }))
+    .sort((a, b) => a.year.localeCompare(b.year));
 
   // ── Line-item analytics ─────────────────────────────────────────────────
   const lit = data.line_item_trends ?? [];
@@ -1064,6 +1085,56 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* 13. Annual total rollup */}
+      {annualTotals.length > 0 && (
+        <>
+          <SectionTitle>🧮 13. Total Spend by Year</SectionTitle>
+          <div style={grid2}>
+            <ChartCard
+              title="Annual Total Spend"
+              subtitle="One bar per calendar year — all utility types combined"
+            >
+              <ResponsiveContainer width="100%" height={chartH(280)}>
+                <BarChart data={annualTotals} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="year" tick={{ fill: "var(--text-2)", fontSize: 12 }} />
+                  <YAxis tick={{ fill: "var(--text-2)", fontSize: 11 }} tickFormatter={v => `€${v}`} />
+                  <Tooltip content={<RichTooltip unit="€" showTotal={false} maxItems={2} />} cursor={{ fill: "rgba(148,163,184,0.08)" }} />
+                  <Bar dataKey="total_eur" name="Total spend" fill="var(--accent)" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </ChartCard>
+
+            <div style={{ background: "var(--surface-1)", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
+              <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--border)", fontSize: 14, fontWeight: 600, color: "var(--text-1)" }}>
+                Yearly Rollup
+              </div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", minWidth: 420, borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                      {["Year", "Bills", "Total", "Average bill"].map(h => (
+                        <th key={h} style={{ padding: "10px 16px", textAlign: "left", color: "var(--text-3)", fontWeight: 600, fontSize: 11, textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...annualTotals].reverse().map((row, i) => (
+                      <tr key={row.year} style={{ borderBottom: i < annualTotals.length - 1 ? "1px solid var(--divider)" : "none" }}>
+                        <td style={{ padding: "10px 16px", color: "var(--text-1)", fontWeight: 600 }}>{row.year}</td>
+                        <td style={{ padding: "10px 16px", color: "var(--text-2)" }}>{row.bill_count}</td>
+                        <td style={{ padding: "10px 16px", color: "var(--success)", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>€{row.total_eur.toFixed(2)}</td>
+                        <td style={{ padding: "10px 16px", color: "var(--text-1)", fontVariantNumeric: "tabular-nums" }}>€{row.avg_bill_eur.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </>

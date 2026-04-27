@@ -74,6 +74,7 @@ const DASHBOARD_SECTIONS: [string, string][] = [
   ["10. Line-Item Cost by Month", "Stacked bars of every individual charge"],
   ["11. Price vs Consumption Decomposition", "Price effect vs volume effect per line item per month"],
   ["12. Month-vs-Month Comparison", "Side-by-side table of two recent months with deltas"],
+  ["13. Total Spend by Year", "Annual rollup of all bills with total spend, bill count, and average bill size"],
 ];
 
 // Curated glossary grouped by theme — full 180+ term dictionary lives
