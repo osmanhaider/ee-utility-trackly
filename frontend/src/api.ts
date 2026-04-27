@@ -165,24 +165,18 @@ export interface ProviderStat {
   avg_eur: number;
 }
 
-export type DeltaCoverage = "full" | "partial" | "none";
-
 export interface MonthlyTotal {
   month: string;
   total_eur: number;
   /** Calendar-aware trailing 3-month average. Falls back to fewer points
    *  on sparse data; equals total_eur when only this month has data. */
   rolling_avg_3m: number;
-  /** Coverage-aware MoM/YoY: computed on the intersection of utility
-   *  types present in both months so that adding a new category mid-year
-   *  doesn't show up as inflation. The `*_coverage` flag reports whether
-   *  the comparison used the full set or only an intersection. */
+  /** Calendar-aware MoM/YoY against the full monthly total. Null when
+   *  the immediately preceding calendar month (or year) has no data. */
   mom_delta_eur: number | null;
   mom_delta_pct: number | null;
-  mom_coverage: DeltaCoverage;
   yoy_delta_eur: number | null;
   yoy_delta_pct: number | null;
-  yoy_coverage: DeltaCoverage;
 }
 
 export const api = {

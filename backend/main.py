@@ -1139,68 +1139,25 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
             round(sum(values) / len(values), 2) if values else 0.0
         )
 
-    # Coverage-aware MoM/YoY: compares the *intersection* of utility types
-    # present in both months so a newly-uploaded category (e.g. user adds
-    # internet bills mid-year) doesn't masquerade as a +50% price hike.
-    # Sub-1%-of-month categories are treated as noise so that residual
-    # "other" rounding amounts don't toggle the coverage flag.
-    month_types: dict[str, set[str]] = defaultdict(set)
-    month_type_total: dict[tuple[str, str], float] = defaultdict(float)
-    for r in by_month:
-        month_types[r["month"]].add(r["utility_type"])
-        month_type_total[(r["month"], r["utility_type"])] = r["total_eur"]
-
-    _COVERAGE_FLOOR_PCT = 0.01
-
-    def _significant_types(month_key: str) -> set[str]:
-        total = month_map.get(month_key, 0.0)
-        if total <= 0:
-            return set()
-        floor = total * _COVERAGE_FLOOR_PCT
-        return {
-            t for t in month_types.get(month_key, set())
-            if month_type_total[(month_key, t)] >= floor
-        }
-
-    def _comparable_delta(
-        cur_key: str, prev_key: str
-    ) -> tuple[float | None, float | None, str]:
-        """Return (delta_eur, delta_pct, coverage) for the cur→prev comparison.
-
-        coverage is one of:
-          - "full"    : both months share exactly the same utility-type set
-          - "partial" : compared on the intersection only; one or both
-                        months had additional utility types
-          - "none"    : no overlap (or no prev data) — deltas are None
-        """
-        if prev_key not in month_map:
-            return None, None, "none"
-        cur_types = _significant_types(cur_key)
-        prev_types = _significant_types(prev_key)
-        common = cur_types & prev_types
-        if not common:
-            return None, None, "none"
-        cur_sub = sum(month_type_total[(cur_key, t)] for t in common)
-        prev_sub = sum(month_type_total[(prev_key, t)] for t in common)
-        if prev_sub == 0:
-            return None, None, "none"
-        delta_eur = round(cur_sub - prev_sub, 2)
-        delta_pct = round((cur_sub - prev_sub) / prev_sub * 100, 1)
-        coverage = "full" if cur_types == prev_types else "partial"
-        return delta_eur, delta_pct, coverage
-
+    # Calendar-aware MoM — compares the full monthly totals across the
+    # immediately preceding calendar month. When that month has no data
+    # the deltas are null so a 6-month gap can't masquerade as "MoM".
     for row in monthly_total:
-        eur, pct, cov = _comparable_delta(row["month"], _prev_month_key(row["month"]))
-        row["mom_delta_eur"] = eur
-        row["mom_delta_pct"] = pct
-        row["mom_coverage"] = cov
+        prev = month_map.get(_prev_month_key(row["month"]))
+        if prev is None or prev == 0:
+            row["mom_delta_eur"] = None
+            row["mom_delta_pct"] = None
+        else:
+            row["mom_delta_eur"] = round(row["total_eur"] - prev, 2)
+            row["mom_delta_pct"] = round((row["total_eur"] - prev) / prev * 100, 1)
 
+    # YoY against the full monthly total a year earlier.
     for row in monthly_total:
         y, m = row["month"].split("-")
-        eur, pct, cov = _comparable_delta(row["month"], f"{int(y) - 1}-{m}")
-        row["yoy_delta_eur"] = eur
-        row["yoy_delta_pct"] = pct
-        row["yoy_coverage"] = cov
+        prev_year_key = f"{int(y) - 1}-{m}"
+        prev = month_map.get(prev_year_key)
+        row["yoy_delta_eur"] = round(row["total_eur"] - prev, 2) if prev else None
+        row["yoy_delta_pct"] = round((row["total_eur"] - prev) / prev * 100, 1) if prev else None
 
     # Line-item level trends — aggregated per (month, item) so duplicate
     # rows (multi-tariff electricity, multiple bills in the same month, etc.)

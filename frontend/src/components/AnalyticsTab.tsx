@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useTheme } from "../theme";
-import { api, type AnalyticsSummary, type DeltaCoverage } from "../api";
+import { api, type AnalyticsSummary } from "../api";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, RadarChart, Radar,
   PolarGrid, PolarAngleAxis, AreaChart, Area, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer,
 } from "recharts";
-import { TrendingUp, TrendingDown, Minus, Loader2, AlertCircle, Download, Info } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, Loader2, AlertCircle, Download } from "lucide-react";
 import html2canvas from "html2canvas";
 import jsPDF from "jspdf";
 
@@ -80,41 +80,6 @@ function contrastTextOn(bg: string): string {
   return yiq >= 140 ? TEXT_DARK : TEXT_LIGHT;
 }
 
-// ── Coverage badge ───────────────────────────────────────────────────────
-// MoM/YoY are computed on the intersection of utility types present in
-// both months. When that intersection is a strict subset, surface a small
-// "partial" badge so a +50% MoM caused purely by adding a new utility
-// type isn't read as price inflation.
-function CoverageBadge({ coverage, delta }: { coverage: DeltaCoverage; delta: "MoM" | "YoY" }) {
-  if (coverage !== "partial") return null;
-  const tooltip =
-    `${delta} compares only the utility types present in both months. ` +
-    `Categories that exist in one month but not the other are excluded ` +
-    `so newly-added (or missing) utilities don't masquerade as a price change.`;
-  return (
-    <span
-      title={tooltip}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 3,
-        marginLeft: 6,
-        padding: "1px 6px",
-        borderRadius: 999,
-        background: "var(--warning-soft)",
-        color: "var(--warning)",
-        fontSize: 10,
-        fontWeight: 600,
-        lineHeight: 1.4,
-        cursor: "help",
-        verticalAlign: "middle",
-      }}
-    >
-      <Info size={10} />
-      partial
-    </span>
-  );
-}
 
 const legendStyle = {
   fontSize: 11,
@@ -708,28 +673,14 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
         <StatCard
           label="Latest Month"
           value={`€${latestMonth.total_eur.toFixed(2)}`}
-          sub={
-            momChange != null ? (
-              <>
-                {`${momChange > 0 ? "+" : ""}${momChange.toFixed(1)}% MoM`}
-                <CoverageBadge coverage={latestMonth.mom_coverage} delta="MoM" />
-              </>
-            ) : undefined
-          }
+          sub={momChange != null ? `${momChange > 0 ? "+" : ""}${momChange.toFixed(1)}% MoM` : undefined}
           trend={momChange == null ? undefined : momChange > 5 ? "up" : momChange < -5 ? "down" : "flat"}
         />
         {latestYoy != null && (
           <StatCard
             label="YoY Change"
             value={`${latestYoy > 0 ? "+" : ""}${latestYoy.toFixed(1)}%`}
-            sub={
-              <>
-                {latestMonth.yoy_delta_eur != null
-                  ? `€${latestMonth.yoy_delta_eur > 0 ? "+" : ""}${latestMonth.yoy_delta_eur.toFixed(2)} vs same month last year`
-                  : "vs same month last year"}
-                <CoverageBadge coverage={latestMonth.yoy_coverage} delta="YoY" />
-              </>
-            }
+            sub={latestMonth.yoy_delta_eur != null ? `€${latestMonth.yoy_delta_eur > 0 ? "+" : ""}${latestMonth.yoy_delta_eur.toFixed(2)} vs same month last year` : "vs same month last year"}
             trend={latestYoy > 5 ? "up" : latestYoy < -5 ? "down" : "flat"}
           />
         )}
@@ -866,17 +817,11 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
                     <tr key={row.month} style={{ borderBottom: i < data.monthly_total.length - 1 ? "1px solid var(--divider)" : "none" }}>
                       <td style={{ padding: "10px 16px", color: "var(--text-1)", fontWeight: 500 }}>{row.month}</td>
                       <td style={{ padding: "10px 16px", color: "var(--success)", fontVariantNumeric: "tabular-nums" }}>€{row.total_eur.toFixed(2)}</td>
-                      <td style={{ padding: "10px 16px" }}>
-                        <PctBadge v={row.mom_delta_pct} label="MoM" />
-                        <CoverageBadge coverage={row.mom_coverage} delta="MoM" />
-                      </td>
+                      <td style={{ padding: "10px 16px" }}><PctBadge v={row.mom_delta_pct} label="MoM" /></td>
                       <td style={{ padding: "10px 16px", color: row.mom_delta_eur == null ? "var(--text-3)" : row.mom_delta_eur > 0 ? "var(--danger)" : "var(--success)", fontVariantNumeric: "tabular-nums", fontSize: 13 }}>
                         {row.mom_delta_eur != null ? `${row.mom_delta_eur > 0 ? "+" : ""}€${row.mom_delta_eur.toFixed(2)}` : "—"}
                       </td>
-                      <td style={{ padding: "10px 16px" }}>
-                        <PctBadge v={row.yoy_delta_pct} label="YoY" />
-                        <CoverageBadge coverage={row.yoy_coverage} delta="YoY" />
-                      </td>
+                      <td style={{ padding: "10px 16px" }}><PctBadge v={row.yoy_delta_pct} label="YoY" /></td>
                       <td style={{ padding: "10px 16px", color: row.yoy_delta_eur == null ? "var(--text-3)" : row.yoy_delta_eur > 0 ? "var(--danger)" : "var(--success)", fontVariantNumeric: "tabular-nums", fontSize: 13 }}>
                         {row.yoy_delta_eur != null ? `${row.yoy_delta_eur > 0 ? "+" : ""}€${row.yoy_delta_eur.toFixed(2)}` : "—"}
                       </td>
