@@ -17,6 +17,10 @@ Three extraction backends are available:
 - **Per-upload model picker** — the UI fetches FreeLLMAPI's enabled model list, the user picks one at upload time, and FreeLLMAPI routes across configured provider keys
 - **Automatic quality detection** — if the local OCR can't read the invoice, the UI shows a warning banner directing the user to switch to an AI model
 - **Open-source OCR pipeline**: Tesseract for images, `pdfplumber` for native-text PDFs, `pdf2image` + OCR fallback for scanned PDFs
+- **Google Sign-In + multi-user data** — each Google account gets its own bill workspace, with optional `ALLOWED_EMAILS` for invite-only deployments
+- **Community insights** — users can browse public bills and analytics across the community, while sensitive bills can be hidden with the lock toggle
+- **Bring your own AI key** — users can save encrypted provider keys (OpenAI-compatible providers such as Google, Groq, Cerebras, NVIDIA NIM, OpenRouter, etc.) and use them directly for extraction
+- **Supabase/Postgres persistence** — production data persists across Render restarts when `DATABASE_URL` is set
 - **Hardcoded Estonian→English dictionary** (~180 terms) — no API call needed for translation when using the local backend
   - Utility services: electricity, gas, water, heating, telecom, waste
   - Korteriühistu line items: Haldusteenus, Küte, Remondifond, Tehnosüsteemide hooldusteenus…
@@ -24,24 +28,23 @@ Three extraction backends are available:
   - Inline meter-reading format: `Alg: 9644 Löpp: 9726` → `[Start: 9644, End: 9726]`
 - **12-section analytics dashboard** with trends, MoM/YoY %, unit-price tracking, price-vs-consumption decomposition
 - **One-click PDF export** of the whole dashboard (client-side, no server round-trip) — paginates at chart boundaries so charts are never split mid-body
-- **Optional shared-password login** gate for deployed instances (disabled by default for local dev)
+- **Light/dark theme toggle** — warm finance styling with a mobile-friendly layout and saved user preference
 
 ## Architecture
 
 ```
-┌────────────────────┐      ┌─────────────────────┐      ┌─────────────────┐
-│  React + Vite UI   │ ───► │  FastAPI backend    │ ───► │  SQLite (bills) │
-│  (Recharts, TSX)   │ ◄─── │  /api/bills/upload  │ ◄─── │                 │
-└────────────────────┘      │  /api/analytics/... │      └─────────────────┘
+┌────────────────────┐      ┌─────────────────────┐      ┌────────────────────┐
+│  React + Vite UI   │ ───► │  FastAPI backend    │ ───► │ Supabase Postgres  │
+│  (Recharts, TSX)   │ ◄─── │  /api/bills/upload  │ ◄─── │ users/bills/keys   │
+└────────────────────┘      │  /api/analytics/... │      └────────────────────┘
                             └─────────┬───────────┘
                                       │
-                       ┌──────────────┴──────────────┐
-                       ▼                             ▼
-              ┌─────────────────┐           ┌────────────────┐
-              │  parser.py      │           │ translation.py │
-              │  Tesseract OCR  │           │ 180-term EST   │
-              │  pdfplumber     │           │ dictionary     │
-              └─────────────────┘           └────────────────┘
+              ┌───────────────────────┼───────────────────────┐
+              ▼                       ▼                       ▼
+       ┌──────────────┐        ┌──────────────┐        ┌──────────────┐
+       │ Local OCR    │        │ FreeLLMAPI   │        │ BYOK direct  │
+       │ Tesseract    │        │ fallback     │        │ provider key │
+       └──────────────┘        └──────────────┘        └──────────────┘
 ```
 
 ## Run with Docker (easiest)
@@ -59,7 +62,7 @@ ANTHROPIC_API_KEY=sk-ant-... PARSER_BACKEND=claude docker compose up --build
 
 > Add provider keys in the FreeLLMAPI dashboard at http://localhost:3001, then use the utility app at http://localhost:5173.
 
-Open **http://localhost:5173**. Uploads and the SQLite DB are persisted in a named volume (`backend-data`).
+Open **http://localhost:5173**. Local Docker uses SQLite in a named volume (`backend-data`). Production should set `DATABASE_URL` to Supabase/Postgres for persistence.
 
 ## Deploy (free tier)
 
@@ -151,7 +154,7 @@ node --version
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/osmanhaider/ee-utility-trackly.git
+git clone https://github.com/usmanhaider/ee-utility-trackly.git
 cd ee-utility-trackly
 ```
 
@@ -233,14 +236,15 @@ npm install
 npm run dev
 ```
 
-Open **http://localhost:5173** in your browser. After Google sign-in you'll see five tabs: **Upload**, **Bills**, **Analytics**, **Community**, **Help**.
+Open **http://localhost:5173** in your browser. After Google sign-in you'll see six tabs: **Upload**, **Bills**, **Analytics**, **Community**, **Settings**, **Help**.
 
 ### 5. Try it
 
-1. Go to **Upload** → pick an extraction method (🔍 Local OCR or 🤖 AI / FreeLLMAPI) and drag in your invoice. The local parser handles Estonian utility bills out of the box; for any other format, switch to the AI tab and pick a FreeLLMAPI model from the dropdown.
+1. Go to **Upload** → pick an extraction method (Local OCR, FreeLLMAPI, or your own saved API key) and drag in your invoice. The local parser handles Estonian utility bills out of the box; for any other format, switch to an AI path.
 2. Open the **Bills** tab. Each row has a globe (public) / lock (private) toggle — bills default to public so they show up in the Community tab.
 3. Open **Analytics** to explore 12 dashboard sections for *your* bills — click **Download PDF** to export.
 4. Open **Community** to browse every signed-in user's public bills and see aggregated insights across the whole community, or filter to a specific user.
+5. Open **Settings** to add your own OpenAI-compatible API keys for direct extraction.
 
 ## Troubleshooting
 
@@ -321,10 +325,13 @@ Glossary (`backend/translation.py`) includes:
 
 ```
 backend/
-├── main.py              FastAPI app, SQLite schema, analytics endpoint
+├── main.py              FastAPI app, auth, upload, analytics, community, BYOK endpoints
+├── db.py                SQLite/Postgres adapter (Supabase via DATABASE_URL)
 ├── parser.py            Tesseract OCR + pdfplumber + regex + column detector
 ├── parser_freellmapi.py FreeLLMAPI client for text-to-JSON extraction
-├── auth.py              Shared-password login (HMAC-signed tokens, stdlib only)
+├── parser_byok.py       User-saved key extraction path
+├── byok.py              Provider catalogue + AES-GCM key encryption helpers
+├── auth.py              HMAC-signed app tokens carrying Google identity
 ├── translation.py       180-term Estonian→English glossary + period parser
 ├── seed_demo.py         Seed 3 sample bills without any API call
 ├── render_preview.py    ASCII preview of the dashboard
@@ -340,7 +347,10 @@ frontend/
     └── components/
         ├── UploadTab.tsx       Drag-and-drop upload + extraction result
         ├── BillsTab.tsx        List/edit/delete bills, per-bill detail view
-        └── AnalyticsTab.tsx    12-section dashboard + Download PDF button
+        ├── AnalyticsTab.tsx    12-section dashboard + Download PDF button
+        ├── CommunityTab.tsx    Community users, public bills and global insights
+        ├── SettingsTab.tsx     User-saved BYOK provider keys
+        └── HelpTab.tsx         Product help and glossary
 ```
 
 ## PDF export
@@ -357,7 +367,7 @@ the codebase is small, tests live in `backend/test_*.py`, and the frontend type-
 
 ## License
 
-[MIT](LICENSE) © 2026 Osman Haider.
+[MIT](LICENSE) © 2026 Usman Haider.
 
 Third-party components keep their own licenses: Tesseract is Apache-2.0; pdfplumber, pdf2image,
 FastAPI, Recharts, html2canvas and jsPDF are MIT.

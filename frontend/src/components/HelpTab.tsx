@@ -308,7 +308,7 @@ export default function HelpTab() {
           <span style={subtleChip}>12-section dashboard</span>
           <span style={subtleChip}><Download size={12} style={{ verticalAlign: -1, marginRight: 4 }} />Client-side PDF export</span>
           <span style={subtleChip}><Sun size={12} style={{ verticalAlign: -1, marginRight: 4 }} /><Moon size={12} style={{ verticalAlign: -1, marginRight: 4 }} />Light & dark themes</span>
-          <span style={subtleChip}><Terminal size={12} style={{ verticalAlign: -1, marginRight: 4 }} />FastAPI + React + SQLite</span>
+          <span style={subtleChip}><Terminal size={12} style={{ verticalAlign: -1, marginRight: 4 }} />FastAPI + React + Supabase/Postgres</span>
         </div>
       </div>
 

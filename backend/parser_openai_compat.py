@@ -150,6 +150,27 @@ def _friendly_rate_limit_error(detail: object, source_name: str) -> str:
     )
 
 
+def _error_detail_from_response(response: httpx.Response) -> object:
+    """Return a compact provider error detail.
+
+    Render/provider outages sometimes return a full HTML error page. Sending
+    that giant document to the Upload queue is noisy and unhelpful, so collapse
+    HTML into a short actionable message.
+    """
+    content_type = response.headers.get("content-type", "").lower()
+    text = response.text
+    if "text/html" in content_type or text.lstrip().lower().startswith("<!doctype html"):
+        return (
+            f"HTTP {response.status_code}: service returned an HTML error page. "
+            "The provider or proxy is temporarily unavailable; retry after it wakes up "
+            "or check its Render/provider logs."
+        )
+    try:
+        return response.json()
+    except json.JSONDecodeError:
+        return text[:500] if len(text) > 500 else text
+
+
 def call_openai_compat_chat(
     invoice_text: str,
     *,
@@ -186,10 +207,7 @@ def call_openai_compat_chat(
             if response.is_success:
                 break
 
-            try:
-                last_detail = response.json()
-            except json.JSONDecodeError:
-                last_detail = response.text
+            last_detail = _error_detail_from_response(response)
 
             transient = _is_rate_limit_response(response.status_code, last_detail) \
                 or _is_transient_status(response.status_code)

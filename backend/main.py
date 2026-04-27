@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import json
 import logging
 import os
@@ -497,33 +498,13 @@ async def upload_bill(
         effective_parser = "byok"
     parse_error: str | None = None
     try:
-        if effective_parser == "claude":
-            parsed = parse_bill_with_claude(save_path)
-        elif effective_parser == "freellmapi":
-            parsed = parse_bill_with_freellmapi(
-                save_path,
-                base_url=FREELLMAPI_BASE_URL,
-                api_key=FREELLMAPI_API_KEY,
-                model=model or FREELLMAPI_MODEL,
-            )
-        elif effective_parser == "byok":
-            byok_row = await _resolve_byok_key(user_id, byok_key_id)
-            try:
-                plaintext_key = byok_mod.decrypt(
-                    byok_row["encrypted_key"], byok_row["iv"], byok_row["tag"],
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    "Couldn't decrypt your saved API key. Re-add it from Settings."
-                ) from e
-            parsed = parse_bill_with_byok(
-                save_path,
-                provider_id=byok_row["provider"],
-                api_key=plaintext_key,
-                model=model or byok_row.get("default_model"),
-            )
-        else:
-            parsed = parse_bill_tesseract(save_path)
+        parsed = await _parse_uploaded_bill(
+            effective_parser=effective_parser,
+            save_path=save_path,
+            user_id=user_id,
+            byok_key_id=byok_key_id,
+            model=model,
+        )
         parsed = enrich_parsed(parsed)  # add translations locally — no API call
     except Exception as e:
         logger.exception("Bill parsing failed for %s (backend=%s)", filename, effective_parser)
@@ -672,6 +653,50 @@ async def upload_bill(
         await db.commit()
 
     return {"id": bill_id, "parsed": parsed, "replaced": replaced}
+
+
+async def _parse_uploaded_bill(
+    *,
+    effective_parser: str,
+    save_path: str,
+    user_id: str,
+    byok_key_id: str | None,
+    model: str | None,
+) -> dict:
+    """Run blocking OCR/LLM extraction in a worker thread.
+
+    The parsers do CPU-ish OCR work and synchronous HTTP calls, so running them
+    directly inside the FastAPI event loop blocks other users while a bill is
+    being processed.
+    """
+    if effective_parser == "claude":
+        return await asyncio.to_thread(parse_bill_with_claude, save_path)
+    if effective_parser == "freellmapi":
+        return await asyncio.to_thread(
+            parse_bill_with_freellmapi,
+            save_path,
+            base_url=FREELLMAPI_BASE_URL,
+            api_key=FREELLMAPI_API_KEY,
+            model=model or FREELLMAPI_MODEL,
+        )
+    if effective_parser == "byok":
+        byok_row = await _resolve_byok_key(user_id, byok_key_id or "")
+        try:
+            plaintext_key = byok_mod.decrypt(
+                byok_row["encrypted_key"], byok_row["iv"], byok_row["tag"],
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "Couldn't decrypt your saved API key. Re-add it from Settings."
+            ) from e
+        return await asyncio.to_thread(
+            parse_bill_with_byok,
+            save_path,
+            provider_id=byok_row["provider"],
+            api_key=plaintext_key,
+            model=model or byok_row.get("default_model"),
+        )
+    return await asyncio.to_thread(parse_bill_tesseract, save_path)
 
 
 @app.get("/api/bills")

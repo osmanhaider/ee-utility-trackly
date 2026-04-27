@@ -184,7 +184,13 @@ async def connect(sqlite_path: str = "bills.db", sqlite_timeout: float = 10.0):
     if is_postgres():
         import asyncpg
 
-        conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+        # Supabase's transaction pooler does not play well with asyncpg's
+        # prepared-statement cache. Disabling it keeps both pooler and direct
+        # URLs working with the same configuration.
+        conn = await asyncpg.connect(
+            os.environ["DATABASE_URL"],
+            statement_cache_size=0,
+        )
         try:
             yield PostgresConnection(conn)
         finally:

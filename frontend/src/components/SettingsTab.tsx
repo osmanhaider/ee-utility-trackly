@@ -47,8 +47,8 @@ export default function SettingsTab() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([api.listByokProviders(), api.listMyByokKeys()])
-      .then(([provRes, keysRes]) => {
+    api.listByokProviders()
+      .then(async (provRes) => {
         if (cancelled) return;
         const list = provRes.data.providers ?? [];
         setProviders(list);
@@ -57,9 +57,22 @@ export default function SettingsTab() {
           setProviderId(list[0].id);
           setModel(list[0].default_model);
         }
-        setKeys(keysRes.data ?? []);
+        if (!provRes.data.configured) {
+          setKeys([]);
+          return;
+        }
+        const keysRes = await api.listMyByokKeys();
+        if (!cancelled) setKeys(keysRes.data ?? []);
       })
-      .catch(() => { if (!cancelled) setErr("Couldn't load BYOK settings."); })
+      .catch((e) => {
+        if (cancelled) return;
+        if (axios.isAxiosError(e) && e.response?.status === 503) {
+          setConfigured(false);
+          setKeys([]);
+        } else {
+          setErr("Couldn't load BYOK settings.");
+        }
+      })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, []);
@@ -401,9 +414,9 @@ export default function SettingsTab() {
       </form>
 
       <p style={{ color: "var(--text-3)", fontSize: 11, marginTop: 16, lineHeight: 1.55 }}>
-        Keys are encrypted with AES-256-GCM before they hit the SQLite database.
+        Keys are encrypted with AES-256-GCM before they hit the database.
         Plaintext never leaves the backend, and listings only return masked values.
-        On Render's free tier the disk resets every redeploy — you'll need to re-add keys after each deploy.
+        In production they persist in Supabase/Postgres alongside your bills.
       </p>
     </div>
   );
