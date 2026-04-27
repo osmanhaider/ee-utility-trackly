@@ -552,10 +552,20 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
     .slice(0, 8)
     .map(x => x!.label);
 
-  // Cap the stacked-bar line items at top 8 by total € across all months,
-  // aggregating the rest as "Other". Prevents legend + tooltip explosion.
+  // Restrict the stacked-bar to the trailing 12 calendar months — older
+  // bars crush horizontal real estate without telling a useful story for
+  // the current period, and the side-by-side comparison (card 12)
+  // already covers month-over-month detail.
+  const liStackMonths = new Set(liMonths.slice(-12));
+  const recentLit = lit.filter(r => liStackMonths.has(r.month));
+  const recentLabels = Array.from(new Set(recentLit.map(r => r.description_en)));
+
+  // Cap the stacked-bar line items at top 8 by total € *within the
+  // visible window*, aggregating the rest as "Other". Computing topLabels
+  // over the same window the chart shows keeps the legend in sync with
+  // the visible bars.
   const labelTotals: Record<string, number> = {};
-  for (const r of lit) {
+  for (const r of recentLit) {
     labelTotals[r.description_en] = (labelTotals[r.description_en] ?? 0) + r.amount_eur;
   }
   const topLabels = Object.entries(labelTotals)
@@ -563,18 +573,19 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
     .slice(0, 8)
     .map(([l]) => l);
   const topLabelSet = new Set(topLabels);
-  const hasOther = liLabels.some(l => !topLabelSet.has(l));
+  const hasOther = recentLabels.some(l => !topLabelSet.has(l));
   const liStackLabels = hasOther ? [...topLabels, "Other"] : topLabels;
 
-  // Rebuild liCostRows with capping: non-top labels are summed into "Other"
   const liStackRows: Record<string, Record<string, number | string>> = {};
-  for (const r of lit) {
+  for (const r of recentLit) {
     if (!liStackRows[r.month]) liStackRows[r.month] = { month: r.month };
     const key = topLabelSet.has(r.description_en) ? r.description_en : "Other";
     const cur = (liStackRows[r.month][key] as number) ?? 0;
     liStackRows[r.month][key] = parseFloat((cur + r.amount_eur).toFixed(2));
   }
-  const liStackData = Object.values(liStackRows).sort((a, b) => String(a.month).localeCompare(String(b.month)));
+  const liStackData = Object.values(liStackRows).sort((a, b) =>
+    String(a.month).localeCompare(String(b.month)),
+  );
 
   const dashboardGrid: React.CSSProperties = {
     display: "grid",
@@ -1070,7 +1081,7 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
           <SectionTitle>🧾 10. Line-Item Cost Comparison Across Months</SectionTitle>
           <ChartCard
             title="Every Line Item by Month"
-            subtitle={`Top ${topLabels.length} charges by total spend${hasOther ? ' · rest grouped as "Other"' : ''}`}
+            subtitle={`Last ${liStackData.length} months · Top ${topLabels.length} charges by total spend${hasOther ? ' · rest grouped as "Other"' : ''}`}
           >
             <div style={{ overflowX: "auto" }}>
               <ResponsiveContainer width={Math.max(600, liStackData.length * 90)} height={360}>
