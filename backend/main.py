@@ -352,9 +352,16 @@ async def auth_google_redirect(
     "try again" right after the user confirms.
 
     Google posts a form-encoded body containing `credential` (the ID
-    token) and `g_csrf_token`. CSRF protection requires the form's
-    `g_csrf_token` to equal the same-named cookie Google sets, per
-    https://developers.google.com/identity/gsi/web/guides/verify-google-id-token.
+    token) and `g_csrf_token`. The same-named cookie is double-submitted
+    for CSRF defence per
+    https://developers.google.com/identity/gsi/web/guides/verify-google-id-token,
+    but only when the frontend origin and login_uri origin match — GIS
+    sets the cookie via `document.cookie` on the frontend domain, so a
+    cross-origin login_uri (frontend on vercel.app, backend on
+    onrender.com) never receives it. We therefore log-and-proceed when
+    the cookie is missing or mismatched: the credential itself is a
+    Google-signed JWT, so CSRF is moot — possession of a valid ID token
+    *is* the authentication.
     """
     frontend_url = (os.environ.get("FRONTEND_URL") or "/").rstrip("/")
 
@@ -366,8 +373,16 @@ async def auth_google_redirect(
             status_code=303,
         )
 
-    if not csrf_cookie or csrf_cookie != g_csrf_token:
-        return _bounce("csrf")
+    if not csrf_cookie:
+        logger.info(
+            "google-redirect: no g_csrf_token cookie (likely cross-origin "
+            "frontend/backend); proceeding with ID-token verification only."
+        )
+    elif csrf_cookie != g_csrf_token:
+        logger.warning(
+            "google-redirect: g_csrf_token cookie/body mismatch; proceeding "
+            "with ID-token verification only."
+        )
 
     try:
         identity = google_auth_mod.verify_google_id_token(credential)

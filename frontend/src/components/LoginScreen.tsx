@@ -43,8 +43,6 @@ const FEATURES: { icon: React.ElementType; title: string; body: string }[] = [
 ];
 
 const REDIRECT_ERROR_MESSAGES: Record<string, string> = {
-  csrf:
-    "Sign-in failed CSRF check. This usually means the session was opened in one browser and finished in another — try again.",
   "invalid-token":
     "Google rejected the sign-in token. Try again, or use a different Google account.",
 };
