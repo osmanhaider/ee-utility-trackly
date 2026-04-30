@@ -339,7 +339,14 @@ async def auth_google(body: GoogleLoginRequest):
 @app.post("/api/auth/google-redirect")
 async def auth_google_redirect(
     credential: str = Form(...),
-    g_csrf_token: str = Form(...),
+    # `g_csrf_token` is sometimes omitted entirely in iOS Safari when
+    # third-party cookie restrictions block GIS from writing
+    # `document.cookie` — FastAPI would otherwise 422 with raw JSON
+    # before our handler runs and bounce the user out of the flow with
+    # a confusing error. Treat it as optional and let the body of the
+    # function decide whether to enforce CSRF (we log-and-proceed when
+    # it's missing, since the credential is a Google-signed JWT).
+    g_csrf_token: str | None = Form(default=None),
     csrf_cookie: str | None = Cookie(default=None, alias="g_csrf_token"),
 ):
     """Server-side endpoint for Google Identity Services' redirect (`ux_mode`)
@@ -373,7 +380,13 @@ async def auth_google_redirect(
             status_code=303,
         )
 
-    if not csrf_cookie:
+    if not g_csrf_token:
+        logger.info(
+            "google-redirect: no g_csrf_token form field (likely iOS "
+            "Safari with restricted third-party cookies); proceeding "
+            "with ID-token verification only."
+        )
+    elif not csrf_cookie:
         logger.info(
             "google-redirect: no g_csrf_token cookie (likely cross-origin "
             "frontend/backend); proceeding with ID-token verification only."
