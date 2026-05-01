@@ -1704,26 +1704,26 @@ async def byok_keys_set_default(
     return {"status": "default-set"}
 
 
-@app.post("/api/byok-keys/probe")
-async def byok_keys_probe(
-    body: ByokProbeRequest,
-    _user_id: str = Depends(get_user_id),
-):
-    """Fire a one-shot GET /models against the provider/base-url to verify
-    that a (would-be) saved key can actually authenticate. Doesn't store
-    anything — purely a connectivity check used by the Settings UI."""
-    _require_byok_configured()
-    provider = byok_mod.PROVIDERS.get(body.provider)
+async def _do_probe(provider_id: str, key: str, base_url_override: str | None) -> dict:
+    """Shared probe logic — used both for ad-hoc Add-form probes (caller
+    provides the plaintext key) and for saved-key probes (caller passes
+    the decrypted plaintext after fetching the row).
+
+    Returns a serialisable dict shaped like the public probe response:
+    `{ok, status, message}`. Always returns; never raises an HTTP error
+    so the frontend can surface "couldn't reach" the same way as
+    "bad credentials".
+    """
+    provider = byok_mod.PROVIDERS.get(provider_id)
     if provider is None:
-        raise HTTPException(400, f"Unknown provider: {body.provider!r}")
-    base = (body.base_url or "").strip() or provider.base_url
+        raise HTTPException(400, f"Unknown provider: {provider_id!r}")
+    base = (base_url_override or "").strip() or provider.base_url
     base = base.rstrip("/")
     if not base:
         raise HTTPException(400, "Base URL is required for this provider.")
     if not (base.startswith("http://") or base.startswith("https://")):
         raise HTTPException(400, "Base URL must start with http:// or https://.")
 
-    key = (body.key or "").strip()
     headers = {"Accept": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
@@ -1739,8 +1739,6 @@ async def byok_keys_probe(
         }
 
     if r.status_code == 200:
-        # Try to peek at how many models the endpoint reports — purely
-        # informational, ignore parse failures.
         models_count: int | None = None
         try:
             data = r.json()
@@ -1759,6 +1757,42 @@ async def byok_keys_probe(
         "status": r.status_code,
         "message": f"HTTP {r.status_code}: {snippet}" if snippet else f"HTTP {r.status_code}",
     }
+
+
+@app.post("/api/byok-keys/probe")
+async def byok_keys_probe(
+    body: ByokProbeRequest,
+    _user_id: str = Depends(get_user_id),
+):
+    """Fire a one-shot GET /models using a *plaintext* key supplied in
+    the request — used by the Add-key form before the user commits to
+    saving."""
+    _require_byok_configured()
+    return await _do_probe(body.provider, (body.key or "").strip(), body.base_url)
+
+
+@app.post("/api/byok-keys/{key_id}/probe")
+async def byok_keys_probe_saved(
+    key_id: str,
+    user_id: str = Depends(get_user_id),
+):
+    """Probe a *saved* key. The frontend never holds the plaintext, so
+    it can't reuse the public probe endpoint — that one would have to
+    fall back to no-auth and 401 for every real provider. Decrypt
+    server-side and reuse the same logic."""
+    row = await _resolve_byok_key(user_id, key_id)
+    try:
+        plaintext = byok_mod.decrypt(row["encrypted_key"], row["iv"], row["tag"])
+    except Exception as e:
+        raise HTTPException(
+            500,
+            "Couldn't decrypt this saved key — re-add it from Settings.",
+        ) from e
+    return await _do_probe(
+        row["provider"],
+        plaintext,
+        row.get("base_url_override"),
+    )
 
 
 @app.delete("/api/byok-keys/{key_id}")

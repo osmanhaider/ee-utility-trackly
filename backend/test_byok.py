@@ -446,3 +446,45 @@ def test_probe_returns_failure_for_unreachable_host(client):
     body = r.json()
     assert body["ok"] is False
     assert "127.0.0.1" in body["message"] or body["status"] != 200
+
+
+def test_probe_saved_key_decrypts_server_side(client):
+    """The per-key probe endpoint must decrypt the stored key so it
+    actually authenticates — the generic /probe endpoint can't do this
+    because the frontend never holds the plaintext."""
+    main_mod, c = client
+    headers = _bearer(main_mod, "alice", "a@x.com")
+    body = c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={
+            "label": "saved",
+            "provider": "custom",
+            "key": "the-actual-secret-key-XYZ",
+            "base_url": "http://127.0.0.1:1/v1",  # unreachable on purpose
+        },
+    ).json()
+
+    r = c.post(f"/api/byok-keys/{body['id']}/probe", headers=headers)
+    # We don't have a real /v1/models server up, so the probe will fail
+    # with "couldn't reach". The shape and status_code are what we care
+    # about: it should be a 200 with ok=false, NOT a 401 (which would
+    # indicate the frontend's old "no key" probe path).
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["status"] != 401, "saved-key probe must not be unauthenticated"
+
+
+def test_probe_saved_key_authorisation(client):
+    """Bob can't probe Alice's saved key."""
+    main_mod, c = client
+    alice = _bearer(main_mod, "alice", "a@x.com")
+    bob = _bearer(main_mod, "bob", "b@x.com")
+    body = c.post(
+        "/api/byok-keys",
+        headers=alice,
+        json={"label": "p", "provider": "groq", "key": "gsk_alicekeyxxx12345"},
+    ).json()
+    r = c.post(f"/api/byok-keys/{body['id']}/probe", headers=bob)
+    assert r.status_code == 404

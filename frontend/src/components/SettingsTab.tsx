@@ -224,16 +224,12 @@ export default function SettingsTab() {
   const onTestSaved = async (key: ByokKey) => {
     setRowProbe(p => ({ ...p, [key.id]: { status: "probing" } }));
     try {
-      const res = await api.probeByokKey({
-        provider: key.provider,
-        // We can't send the saved key (we don't have plaintext); we rely
-        // on whatever the provider's /v1/models endpoint accepts. For
-        // most this means we get a 401 if the key is "wrong" — which is
-        // *exactly the signal we want* without ever seeing the key.
-        // For local/Ollama we also don't have the key.
-        // The probe endpoint is happy with no key supplied.
-        base_url: key.base_url_override ?? undefined,
-      });
+      // Use the per-key endpoint — it decrypts server-side and probes
+      // with the real key. The generic /probe endpoint takes a
+      // plaintext key from the body, which we deliberately don't have
+      // on the frontend, so reusing it would always 401 against any
+      // provider that gates /v1/models behind auth.
+      const res = await api.probeSavedByokKey(key.id);
       setRowProbe(p => ({
         ...p,
         [key.id]: {
@@ -742,12 +738,13 @@ function EditKeyModal({ k, provider, onClose, onSaved }: EditModalProps) {
 
   const onTest = async () => {
     if (!provider) return;
+    // Probe the *saved* key — server-side decrypt so we don't need the
+    // plaintext on the frontend. Tests against whatever base URL is
+    // currently saved, not the one the user may be typing into the
+    // modal. If they're changing the URL, they should Save first.
     setProbe({ status: "probing" });
     try {
-      const res = await api.probeByokKey({
-        provider: k.provider,
-        base_url: baseUrl.trim() || undefined,
-      });
+      const res = await api.probeSavedByokKey(k.id);
       setProbe({
         status: res.data.ok ? "ok" : "fail",
         message: res.data.message,
@@ -897,10 +894,10 @@ function EditKeyModal({ k, provider, onClose, onSaved }: EditModalProps) {
           <button
             type="button"
             onClick={onTest}
-            disabled={saving || probe.status === "probing"
-              || (provider?.requires_base_url && !baseUrl.trim())}
+            disabled={saving || probe.status === "probing"}
             className="btn-press"
             style={secondaryBtnStyle}
+            title="Tests the saved key against its currently-saved base URL. Save your changes first to probe a new URL."
           >
             {probe.status === "probing"
               ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />

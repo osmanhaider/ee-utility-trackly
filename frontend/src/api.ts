@@ -248,5 +248,7 @@ export const api = {
     axios.post<{ status: string }>(`${BASE}/api/byok-keys/${id}/default`),
   probeByokKey: (input: { provider: string; key?: string; base_url?: string }) =>
     axios.post<ByokProbeResult>(`${BASE}/api/byok-keys/probe`, input),
+  probeSavedByokKey: (id: string) =>
+    axios.post<ByokProbeResult>(`${BASE}/api/byok-keys/${id}/probe`),
   deleteByokKey: (id: string) => axios.delete(`${BASE}/api/byok-keys/${id}`),
 };
