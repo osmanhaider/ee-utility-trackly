@@ -404,26 +404,42 @@ export default function BillsTab({ onDataChange }: BillsTabProps = {}) {
                   </div>
                   {bill.consumption_kwh != null && !isMobile && <div style={{ fontSize: 12, color: "var(--text-2)" }}>{bill.consumption_kwh} kWh</div>}
                   {bill.consumption_m3 != null && !isMobile && <div style={{ fontSize: 12, color: "var(--text-2)" }}>{bill.consumption_m3} m³</div>}
+                  {/* Subtle private indicator on mobile so the user can
+                      see the privacy state at a glance even though the
+                      toggle button has moved into the expanded view. */}
+                  {isMobile && bill.is_private ? (
+                    <div style={{ fontSize: 10, color: "var(--warning)", marginTop: 2, display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
+                      <Lock size={9} /> private
+                    </div>
+                  ) : null}
                 </div>
-                <button
-                  onClick={e => togglePrivate(bill, e)}
-                  title={bill.is_private ? "Private — only you can see this bill. Click to make it public." : "Public — visible to all signed-in users. Click to make it private."}
-                  style={{
-                    ...rowIconButtonStyle,
-                    color: bill.is_private ? "var(--warning)" : "var(--success)",
-                  }}
-                >
-                  {bill.is_private ? <Lock size={15} /> : <Globe size={15} />}
-                </button>
-                <button
-                  onClick={e => deleteBill(bill.id, e)}
-                  style={{
-                    ...rowIconButtonStyle,
-                    color: "var(--text-3)",
-                  }}
-                >
-                  <Trash2 size={15} />
-                </button>
+                {/* Privacy + delete affordances live in the expanded
+                    panel on mobile (the row was too cramped — fixed
+                    icons were squeezing the middle column to ~60px and
+                    causing text to overlap the amount column). */}
+                {!isMobile && (
+                  <button
+                    onClick={e => togglePrivate(bill, e)}
+                    title={bill.is_private ? "Private — only you can see this bill. Click to make it public." : "Public — visible to all signed-in users. Click to make it private."}
+                    style={{
+                      ...rowIconButtonStyle,
+                      color: bill.is_private ? "var(--warning)" : "var(--success)",
+                    }}
+                  >
+                    {bill.is_private ? <Lock size={15} /> : <Globe size={15} />}
+                  </button>
+                )}
+                {!isMobile && (
+                  <button
+                    onClick={e => deleteBill(bill.id, e)}
+                    style={{
+                      ...rowIconButtonStyle,
+                      color: "var(--text-3)",
+                    }}
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                )}
                 {isOpen
                   ? <ChevronUp size={15} style={{ flexShrink: 0, color: "var(--text-3)" }} />
                   : <ChevronDown size={15} style={{ flexShrink: 0, color: "var(--text-3)" }} />}
@@ -431,6 +447,46 @@ export default function BillsTab({ onDataChange }: BillsTabProps = {}) {
 
               {isOpen && (
                 <div className="fade-in" style={{ borderTop: "1px solid var(--divider)", padding: "16px 20px" }}>
+                  {/* Mobile-only action row: the privacy toggle + delete
+                      buttons live here on small screens so the row
+                      header stays uncramped. Desktop keeps the icons
+                      inline next to the row. */}
+                  {isMobile && (
+                    <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                      <button
+                        onClick={e => togglePrivate(bill, e)}
+                        className="btn-press"
+                        style={{
+                          flex: 1,
+                          display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                          padding: "10px 12px", borderRadius: 8,
+                          border: `1px solid ${bill.is_private ? "var(--warning)" : "var(--success)"}`,
+                          background: "transparent",
+                          color: bill.is_private ? "var(--warning)" : "var(--success)",
+                          fontSize: 13, fontWeight: 600, cursor: "pointer",
+                        }}
+                      >
+                        {bill.is_private ? <Lock size={14} /> : <Globe size={14} />}
+                        {bill.is_private ? "Private — make public" : "Public — make private"}
+                      </button>
+                      <button
+                        onClick={e => deleteBill(bill.id, e)}
+                        className="btn-press"
+                        style={{
+                          display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                          padding: "10px 14px", borderRadius: 8,
+                          border: "1px solid var(--danger)",
+                          background: "transparent",
+                          color: "var(--danger)",
+                          fontSize: 13, fontWeight: 600, cursor: "pointer",
+                        }}
+                      >
+                        <Trash2 size={14} />
+                        Delete
+                      </button>
+                    </div>
+                  )}
+
                   {raw.translated_summary && (
                     <div style={{ marginBottom: 16, padding: "12px 14px", background: "var(--accent-soft)", borderLeft: "3px solid var(--accent)", borderRadius: 6 }}>
                       <div style={{ fontSize: 11, color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4, fontWeight: 600 }}>
