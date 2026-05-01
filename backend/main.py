@@ -273,6 +273,25 @@ _AUTH_EXEMPT_PATHS = frozenset({
 
 
 @app.middleware("http")
+async def no_store_for_api(request: Request, call_next):
+    """Forbid HTTP caching of every /api/* response.
+
+    Without an explicit Cache-Control header, browsers (especially iOS
+    Safari and the standalone PWA shell) fall back to heuristic
+    caching, so a re-fetch of /api/analytics/summary or /api/bills can
+    silently serve the previous payload after a delete/edit even when
+    the React effect correctly re-fires. Setting `no-store` makes every
+    API call hit the origin every time.
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, max-age=0, must-revalidate"
+        # Pragma is a legacy header some intermediate proxies still honour.
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     # CORS preflights must pass through untouched — the browser strips
     # custom headers (including Authorization) before sending them.

@@ -210,7 +210,14 @@ export const api = {
   listBills: () => axios.get<Bill[]>(`${BASE}/api/bills`),
   deleteBill: (id: string) => axios.delete(`${BASE}/api/bills/${id}`),
   updateBill: (id: string, data: Partial<Bill>) => axios.put(`${BASE}/api/bills/${id}`, data),
-  getAnalytics: () => axios.get<AnalyticsSummary>(`${BASE}/api/analytics/summary`),
+  // _t cache-buster guarantees URL uniqueness per call so any layer of
+  // browser HTTP caching (notably iOS Safari standalone-PWA shell) can't
+  // silently return the previous payload after a delete/edit. The
+  // backend also sends Cache-Control: no-store on all /api/* responses,
+  // but this is defence in depth.
+  getAnalytics: () => axios.get<AnalyticsSummary>(`${BASE}/api/analytics/summary`, {
+    params: { _t: Date.now() },
+  }),
   getFreeLlmModels: () =>
     axios.get<{ models: { id: string; label: string }[]; cached?: boolean; error?: string }>(
       `${BASE}/api/freellmapi-models`
@@ -227,7 +234,7 @@ export const api = {
     }),
   getCommunityAnalytics: (targetUserId?: string) =>
     axios.get<AnalyticsSummary>(`${BASE}/api/community/analytics`, {
-      params: targetUserId ? { target_user_id: targetUserId } : undefined,
+      params: { _t: Date.now(), ...(targetUserId ? { target_user_id: targetUserId } : {}) },
     }),
   listByokProviders: () =>
     axios.get<{ configured: boolean; providers: ByokProvider[] }>(`${BASE}/api/byok-providers`),
