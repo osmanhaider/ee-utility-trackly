@@ -4,49 +4,63 @@
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Node 18+](https://img.shields.io/badge/node-18%2B-green)
 
-Upload any invoice or bill (image or PDF), get it parsed into structured line items, and explore spending patterns through a 12-section analytics dashboard.
+Upload any invoice or bill (image or PDF), get it parsed into structured line items, and explore spending patterns through a 13-section analytics dashboard. Multi-user with Google Sign-In, optional community insights, and an installable iOS web app.
 
 This project is **open source**. Contributions, bug reports, feature ideas, parser improvements, provider additions, and Estonian utility-bill edge cases are very welcome.
 
-Three extraction backends are available:
-- **Local OCR** *(default)* — Tesseract + `pdfplumber`, optimized for Estonian utility bills. Runs entirely locally, no API key required.
+## Extraction backends
+
+The system has three first-party backends plus per-user "bring your own key" (BYOK):
+
+- **Local OCR** *(default)* — Tesseract + `pdfplumber`, optimised for Estonian utility bills. Runs entirely locally, no API key required.
 - **Free AI via FreeLLMAPI** *(recommended for non-Estonian or unusual invoices)* — local OCR/PDF text extraction followed by routed LLM JSON extraction. Set `PARSER_BACKEND=freellmapi`.
 - **Claude API** *(premium alternative)* — highest accuracy, paid. Set `PARSER_BACKEND=claude`.
+- **BYOK** *(per-user)* — every signed-in user can save their own keys to OpenAI-compatible providers (Groq, Cerebras, Gemini, OpenRouter, NVIDIA NIM, Mistral, Together AI, Fireworks, OpenAI, Ollama, or any custom OpenAI-compatible gateway like OpenClaw / vLLM / LiteLLM) and use them directly from the Upload tab.
 
 ## Features
 
-- **Three extraction backends** — local OCR for Estonian utility bills, free AI (FreeLLMAPI) for anything else (rent, subscriptions, services, non-Estonian invoices, scanned docs with unusual layouts), Claude API as a premium option
-- **Per-upload model picker** — the UI fetches FreeLLMAPI's enabled model list, the user picks one at upload time, and FreeLLMAPI routes across configured provider keys
-- **Automatic quality detection** — if the local OCR can't read the invoice, the UI shows a warning banner directing the user to switch to an AI model
-- **Open-source OCR pipeline**: Tesseract for images, `pdfplumber` for native-text PDFs, `pdf2image` + OCR fallback for scanned PDFs
-- **Google Sign-In + multi-user data** — each Google account gets its own bill workspace, with optional `ALLOWED_EMAILS` for invite-only deployments
-- **Community insights** — users can browse public bills and analytics across the community, while sensitive bills can be hidden with the lock toggle
-- **Bring your own AI key** — users can save encrypted provider keys (OpenAI-compatible providers such as Google, Groq, Cerebras, NVIDIA NIM, OpenRouter, etc.) and use them directly for extraction
-- **Supabase/Postgres persistence** — production data persists across Render restarts when `DATABASE_URL` is set
-- **Hardcoded Estonian→English dictionary** (~180 terms) — no API call needed for translation when using the local backend
-  - Utility services: electricity, gas, water, heating, telecom, waste
-  - Korteriühistu line items: Haldusteenus, Küte, Remondifond, Tehnosüsteemide hooldusteenus…
-  - Months (Jaanuar → January), weekdays, units, invoice field labels
-  - Inline meter-reading format: `Alg: 9644 Löpp: 9726` → `[Start: 9644, End: 9726]`
-- **12-section analytics dashboard** with trends, MoM/YoY %, unit-price tracking, price-vs-consumption decomposition
-- **One-click PDF export** of the whole dashboard (client-side, no server round-trip) — paginates at chart boundaries so charts are never split mid-body
-- **Light/dark theme toggle** — warm finance styling with a mobile-friendly layout and saved user preference
+- **Multi-user Google Sign-In** — each Google account gets its own bill workspace. Optional `ALLOWED_EMAILS` allowlist for invite-only deployments. iOS Safari and the standalone home-screen PWA use a redirect-mode flow that works around iOS's storage-partitioning of the popup-based GIS flow.
+- **Installable iOS Home-Screen app** — `manifest.webmanifest` + apple-touch-icon + safe-area handling let users add the app to their home screen and launch it in standalone mode (no Safari chrome).
+- **Bring your own AI key (BYOK)** — encrypted-at-rest provider keys, multiple keys per user, **Edit** / **Set as default per provider** / **Test connection** controls. Custom URL field unlocks self-hosted endpoints (Ollama, OpenClaw gateway, vLLM, etc.).
+- **Community insights** — browse other signed-in users' public bill collections and per-user dashboards. Privacy is opt-out: any bill can be marked private with a single toggle.
+- **Per-upload model picker** — the Upload tab fetches FreeLLMAPI's enabled model list and routes through configured provider keys; the user can pick a model per upload, BYOK or otherwise.
+- **Automatic quality detection** — when local OCR can't read an invoice, the UI prompts to switch to an AI backend.
+- **Open-source OCR pipeline** — Tesseract for images, `pdfplumber` for native-text PDFs, `pdf2image` + OCR fallback for scanned PDFs.
+- **Hardcoded Estonian→English dictionary** (~180 terms) — no API call needed for translation when using the local backend. Months, weekdays, units, korteriühistu line items, inline meter-reading parsing.
+- **13-section analytics dashboard** — trends, calendar-aware MoM/YoY, weighted seasonal patterns, **Bennet** price-vs-consumption decomposition (price + volume sum exactly to total Δ), per-utility unit-price tracking, annual rollup, and more.
+- **One-click PDF export** — client-side via html2canvas + jsPDF; paginates at chart boundaries so charts are never split mid-body.
+- **Light / dark / system theme** with warm-finance styling, mobile-first layouts, and saved preference.
+- **Per-device-timezone timestamps** — bill upload times render in the viewer's local timezone via `Intl.DateTimeFormat` (no hardcoded zone).
+- **Supabase / Postgres persistence** — production data persists across Render restarts when `DATABASE_URL` is set; local dev falls back to SQLite.
+- **No-store API responses** — every `/api/*` response carries `Cache-Control: no-store, must-revalidate` so iOS Safari and the PWA shell can't serve stale numbers after a delete or edit.
 
 ## Architecture
 
 ```
-┌────────────────────┐      ┌─────────────────────┐      ┌────────────────────┐
-│  React + Vite UI   │ ───► │  FastAPI backend    │ ───► │ Supabase Postgres  │
-│  (Recharts, TSX)   │ ◄─── │  /api/bills/upload  │ ◄─── │ users/bills/keys   │
-└────────────────────┘      │  /api/analytics/... │      └────────────────────┘
-                            └─────────┬───────────┘
-                                      │
-              ┌───────────────────────┼───────────────────────┐
-              ▼                       ▼                       ▼
-       ┌──────────────┐        ┌──────────────┐        ┌──────────────┐
-       │ Local OCR    │        │ FreeLLMAPI   │        │ BYOK direct  │
-       │ Tesseract    │        │ fallback     │        │ provider key │
-       └──────────────┘        └──────────────┘        └──────────────┘
+                   ┌──────────────────────┐         ┌────────────────────┐
+                   │  React + Vite SPA    │ ──────► │  Supabase Postgres │
+                   │  (Recharts, TSX)     │         │  users / bills /   │
+ iOS Home-screen   │  Vercel-hosted       │ ◄────── │  user_api_keys     │
+ PWA + manifest ──►│                      │         └─────────┬──────────┘
+                   └──────────┬───────────┘                   │
+                              │ HTTPS                         │
+                              ▼                               │
+              ┌─────────────────────────────────┐             │
+              │  FastAPI backend (Render)       │ ────────────┘
+              │  /api/auth/{google,me,...}      │
+              │  /api/bills/{upload,update,...} │
+              │  /api/byok-keys/{,probe,...}    │
+              │  /api/analytics/summary         │
+              │  /api/community/{users,bills,…} │
+              └─────────┬───────────────────────┘
+                        │
+   ┌────────────────────┼────────────────────┬─────────────────────┐
+   ▼                    ▼                    ▼                     ▼
+┌──────────┐     ┌──────────────┐    ┌──────────────┐     ┌─────────────────┐
+│ Local OCR│     │ FreeLLMAPI   │    │ Claude API   │     │ BYOK direct     │
+│ Tesseract│     │ proxy router │    │ Anthropic    │     │ (Groq, Gemini,  │
+│ pdfplumber│    │ (free LLMs)  │    │ (paid)       │     │  Ollama, custom)│
+└──────────┘     └──────────────┘    └──────────────┘     └─────────────────┘
 ```
 
 ## Run with Docker (easiest)
@@ -76,10 +90,12 @@ A free-tier cloud setup: **Vercel** for the frontend, **Render** for the backend
 
 1. Open [Google Cloud Console → APIs & Services → Credentials](https://console.cloud.google.com/apis/credentials).
 2. **Create Credentials** → **OAuth client ID** → Application type **Web application**.
-3. **Authorized JavaScript origins**: add both
+3. **Authorized JavaScript origins** — add both:
    - `http://localhost:5173`
    - `https://<your-vercel-host>.vercel.app`
-4. Save. Copy the **Client ID** (looks like `123456-abc.apps.googleusercontent.com`). The same value goes into `GOOGLE_CLIENT_ID` (backend) and `VITE_GOOGLE_CLIENT_ID` (frontend).
+4. **Authorized redirect URIs** — add the backend redirect endpoint (required for the iOS sign-in flow):
+   - `https://<your-render-host>.onrender.com/api/auth/google-redirect`
+5. Save. Copy the **Client ID** (looks like `123456-abc.apps.googleusercontent.com`). The same value goes into `GOOGLE_CLIENT_ID` (backend) and `VITE_GOOGLE_CLIENT_ID` (frontend).
 
 ### 1. Create a Supabase Postgres database
 
@@ -92,7 +108,7 @@ A free-tier cloud setup: **Vercel** for the frontend, **Render** for the backend
    postgresql://postgres.<project-ref>:<password>@aws-...pooler.supabase.com:6543/postgres
    ```
 
-The backend creates/migrates its tables on startup (`users`, `bills`, `user_api_keys`) when `DATABASE_URL` is set.
+The backend creates and migrates its tables on startup (`users`, `bills`, `user_api_keys`) when `DATABASE_URL` is set — including idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` migrations for newer columns (`is_private`, `is_default`, `base_url_override`).
 
 ### 2. Backend on Render
 
@@ -108,10 +124,15 @@ The backend creates/migrates its tables on startup (`users`, `bills`, `user_api_
    - `FREELLMAPI_MODEL` = `auto` *(optional; overridable per upload)*
    - `DATABASE_URL` = the Supabase connection string from step 1
    - `GOOGLE_CLIENT_ID` = the Web Client ID from step 0
+   - `FRONTEND_URL` = `https://<your-vercel-host>.vercel.app` *(required for the iOS sign-in redirect to come back to the SPA)*
    - `ALLOWED_EMAILS` = optional comma-separated allowlist, e.g. `you@gmail.com,friend@gmail.com`
    - `AUTH_SECRET` = a long random hex string — generate locally with:
      ```
      python -c "import secrets; print(secrets.token_hex(32))"
+     ```
+   - `BYOK_ENCRYPTION_KEY` = base64- or hex-encoded 32-byte key for at-rest encryption of user API keys. Without it, BYOK is disabled and Settings shows a warning. Generate locally with:
+     ```
+     python -c "import secrets, base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"
      ```
 4. Click **Create Web Service**. First build takes ~5 min. Copy the generated URL (e.g. `https://ee-utility-trackly.onrender.com`).
 
@@ -128,7 +149,7 @@ The free tier spins down after 15 minutes of inactivity. The first request after
    - `VITE_GOOGLE_CLIENT_ID` = the Web Client ID from step 0
 4. Click **Deploy**. Your app is live at `https://<project>.vercel.app`.
 
-The bundled `frontend/vercel.json` provides SPA routing so deep links / refreshes don't 404.
+The bundled `frontend/vercel.json` provides SPA routing so deep links / refreshes don't 404. The `apple-touch-icon.png` and `manifest.webmanifest` ship from `frontend/public/`, making the deployed site installable as an iOS home-screen app.
 
 ### 4. CORS
 
@@ -142,6 +163,16 @@ CORS_ALLOW_ORIGINS=https://bills.example.com,https://www.bills.example.com
 Visiting the Vercel URL shows a Google Sign-In button. The first sign-in creates a row in the `users` table keyed on the Google `sub` claim. The app token is stored in `localStorage` and lasts 7 days (override with `TOKEN_TTL_SEC`). Rotate `AUTH_SECRET` to invalidate every existing session immediately.
 
 To restrict who can sign in, set `ALLOWED_EMAILS` on Render. Anyone outside the list gets a clear `not on the allowlist` error and never reaches the app.
+
+**Two sign-in flows:**
+- **Desktop / Android** — popup-based GIS flow (lower friction, in-page).
+- **iOS Safari and the standalone PWA** — full-page redirect flow that POSTs the credential to `/api/auth/google-redirect` on the backend, which mints the app token and redirects to `/auth/callback#token=…` on the frontend. Required because iOS partitions standalone-PWA storage from Safari, breaking the popup flow's postMessage credential delivery.
+
+## Install on iPhone (PWA)
+
+1. Open `https://<your-vercel-host>.vercel.app` in **Safari** on iOS (Chrome's iOS "Add to Home Screen" produces a regular bookmark, not a standalone app — must be Safari).
+2. Tap the **Share** button → **Add to Home Screen** → **Add**.
+3. Launch the new icon — it opens in standalone mode (no Safari URL bar / nav), respects the notch via safe-area padding, and remembers your sign-in across launches.
 
 ## Run locally
 
@@ -219,9 +250,12 @@ Backend env vars (see `backend/.env.example` for the full list):
 - `PARSER_BACKEND=claude` — Anthropic Claude API, requires `ANTHROPIC_API_KEY` (paid). Highest accuracy; use only if FreeLLMAPI isn't getting the job done.
 - `AUTH_SECRET` — required. 64-char hex, generate with `python -c "import secrets; print(secrets.token_hex(32))"`. Used to sign app session tokens.
 - `GOOGLE_CLIENT_ID` — required. OAuth Web Client ID from Google Cloud Console (same value as the frontend's `VITE_GOOGLE_CLIENT_ID`).
+- `FRONTEND_URL` — required for production iOS sign-in (the redirect flow lands the user back here after Google auth). Local dev defaults to `/` if unset.
 - `ALLOWED_EMAILS` — optional comma-separated allowlist (e.g. `you@gmail.com,friend@gmail.com`). When set, only those Google accounts can sign in.
+- `BYOK_ENCRYPTION_KEY` — optional. Base64- or hex-encoded 32 bytes. Required if you want the BYOK feature enabled (Settings tab); without it, the BYOK UI shows a warning and saving keys is blocked.
 - `DATABASE_URL` — optional locally, required in production for persistent Supabase/Postgres storage. If unset, the backend uses local SQLite at `DB_PATH`.
 - `MAX_UPLOAD_BYTES` — hard cap on upload size in bytes per file (default 25 MB). Multi-file uploads are supported; each file is bounded by this limit.
+- `ANALYTICS_CACHE_TTL_SEC` — in-memory analytics cache TTL (default 60 s). The cache is also wiped on every bill mutation.
 - `DB_PATH`, `UPLOADS_DIR`, `LOG_LEVEL` — override storage paths and log verbosity.
 
 Frontend env vars (see `frontend/.env.example`):
@@ -243,10 +277,39 @@ Open **http://localhost:5173** in your browser. After Google sign-in you'll see 
 ### 5. Try it
 
 1. Go to **Upload** → pick an extraction method (Local OCR, FreeLLMAPI, or your own saved API key) and drag in your invoice. The local parser handles Estonian utility bills out of the box; for any other format, switch to an AI path.
-2. Open the **Bills** tab. Each row has a globe (public) / lock (private) toggle — bills default to public so they show up in the Community tab.
-3. Open **Analytics** to explore 12 dashboard sections for *your* bills — click **Download PDF** to export.
-4. Open **Community** to browse every signed-in user's public bills and see aggregated insights across the whole community, or filter to a specific user.
-5. Open **Settings** to add your own OpenAI-compatible API keys for direct extraction.
+2. Open the **Bills** tab. Each row has a globe (public) / lock (private) toggle — bills default to public so they show up in the Community tab. Upload timestamps render in your device's local timezone; tap a row to expand it for full metadata + line items.
+3. Open **Analytics** to explore 13 dashboard sections for *your* bills — click **Download PDF** to export.
+4. Open **Community** to browse other signed-in users' public bills and per-user dashboards.
+5. Open **Settings** to add OpenAI-compatible API keys. Each key supports a custom **Default model**, **Set as default** for its provider, **Test connection** (decrypted server-side), in-place **Edit**, and an optional **Base URL** for self-hosted endpoints (Ollama, OpenClaw, vLLM…).
+
+## Bring your own key (BYOK)
+
+The Settings tab lets each signed-in user save their own provider API keys. Backed by `byok.py`'s provider catalogue and AES-256-GCM at-rest encryption (`BYOK_ENCRYPTION_KEY`), exposed via:
+
+- `GET /api/byok-providers` — public catalogue with `requires_base_url` and `allows_empty_key` flags.
+- `GET /api/byok-keys` — masked listing of the caller's saved keys, defaults first.
+- `POST /api/byok-keys` — create with optional `base_url`, optional `is_default`.
+- `PATCH /api/byok-keys/{id}` — edit `label` / `default_model` / `base_url`. The encrypted key value itself isn't editable (delete + re-add to rotate).
+- `POST /api/byok-keys/{id}/default` — atomically promote one key to default-for-its-provider.
+- `POST /api/byok-keys/probe` — pre-save connectivity probe with a plaintext key.
+- `POST /api/byok-keys/{id}/probe` — saved-key connectivity probe; the key is decrypted server-side so the frontend never holds plaintext.
+- `DELETE /api/byok-keys/{id}` — delete.
+
+Built-in provider presets:
+
+| Provider | Model | Notes |
+|---|---|---|
+| OpenAI | `gpt-4o-mini` | |
+| Google (Gemini) | `gemini-2.5-flash` | Free tier available |
+| Groq | `llama-3.3-70b-versatile` | Free tier; **fastest** option |
+| Cerebras | `llama-3.3-70b` | Free tier |
+| Mistral | `mistral-small-latest` | |
+| OpenRouter | `google/gemini-2.0-flash-exp:free` | Many models behind one key |
+| Together AI | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | |
+| Fireworks AI | `accounts/fireworks/models/llama-v3p3-70b-instruct` | |
+| NVIDIA NIM | `z-ai/glm4.7` | |
+| **Ollama (self-hosted)** | `llama3.1:8b` | Requires base URL; key may be blank |
+| **Custom (OpenAI-compatible)** | *(any)* | Requires base URL; works with OpenClaw / vLLM / LiteLLM / any `/v1/chat/completions` endpoint |
 
 ## Troubleshooting
 
@@ -280,6 +343,15 @@ The selected FreeLLMAPI model failed, no provider keys are healthy, or the model
 **`FreeLLMAPI request failed`**
 The utility backend can reach FreeLLMAPI but the proxy rejected or could not route the request. Confirm FreeLLMAPI is running, provider keys are configured, and `FREELLMAPI_API_KEY` matches your unified key if you enforce auth.
 
+**iOS sign-in shows "Something went wrong" or hangs after entering password**
+The redirect URI isn't whitelisted in Google Cloud Console. Add `https://<your-render-host>.onrender.com/api/auth/google-redirect` under **Authorized redirect URIs** for your OAuth client, and confirm `FRONTEND_URL` is set on the Render backend.
+
+**Saved BYOK key always reports HTTP 401 when I tap Test connection**
+Make sure both the backend (Render) and frontend (Vercel) have redeployed after the BYOK feature additions; the Test button calls a per-key endpoint that decrypts the saved key server-side. If you previously tested before that endpoint shipped, hard-refresh the page or remove + re-add the home-screen icon.
+
+**Analytics dashboard doesn't reflect a delete / edit**
+Backend cache is cleared on every bill mutation and `Cache-Control: no-store` is sent on every `/api/*` response. If numbers still look stale: hard-refresh the page (or remove + re-add the home-screen icon on iOS) so a stale Vercel bundle isn't being served.
+
 ## Parser accuracy
 
 Tested on real Tallinn korteriühistu invoices:
@@ -293,25 +365,26 @@ Tested on real Tallinn korteriühistu invoices:
 
 Native-text PDFs give **high confidence** (pdfplumber, 100% character accuracy).
 Scanned PDFs and images give **medium confidence** (Tesseract OCR, occasional accent drops).
-For non-Estonian or non-standard invoices, switch to the **AI (FreeLLMAPI)** backend. It uses the same local text extraction first, then asks your routed free LLM providers to structure the data.
+For non-Estonian or non-standard invoices, switch to the **AI (FreeLLMAPI)** backend, or use a BYOK key for direct provider access. All AI paths still use the local text extraction first.
 
 ## Dashboard sections
 
-| # | Section | What it shows |
-|---|---------|---------------|
-| — | **KPI cards** | Total spend · latest month with MoM% · YoY change · rolling avg · highest bill |
-| 1 | Monthly Trend | Line + area chart with 3-month rolling average overlay |
-| 2 | MoM & YoY % | Bar charts + full change table with € and % deltas per month |
-| 3 | Type Breakdown | Stacked bar + donut showing share of each utility category |
-| 4 | Seasonal Patterns | Average bill by calendar month + 4-season radar profile |
-| 5 | Annual Comparison | Year-over-year spend by category |
-| 6 | Top Providers | Horizontal bar ranking suppliers by total spend |
-| 7 | Per-Utility Trends | One line per utility type — spot individual spikes |
-| 8 | Summary Statistics | Min/max/avg/consumption per utility type |
-| 9 | Unit Price Trends | €/kWh, €/m², €/m³ over time — isolates tariff changes from usage |
-| 10 | Line-Item Cost by Month | Stacked bars of every individual charge |
-| 11 | Price vs Consumption Decomposition | price_effect vs vol_effect per line item per month |
+| #  | Section | What it shows |
+|----|---------|---------------|
+| —  | **KPI cards** | Total spend · latest month with MoM% · YoY change · 3-month rolling avg · highest bill · avg per active month · total kWh |
+| 1  | Monthly Trend | Line + area chart with calendar-aware 3-month rolling average overlay |
+| 2  | MoM & YoY %  | Bar charts + full change table with € and % deltas per month |
+| 3  | Type Breakdown | Stacked bar + donut showing share of each utility category (line-items reconciled to bill total) |
+| 4  | Seasonal Patterns | Average bill by calendar month + 4-season radar profile (weighted, Σtotal/Σcount) |
+| 5  | Annual Comparison | Year-over-year spend by category |
+| 6  | Top Providers | Horizontal bar ranking suppliers by total spend |
+| 7  | Per-Utility Trends | One line per utility type — spot individual spikes |
+| 8  | Summary Statistics | Bills, total, avg/bill, min/max/consumption per utility type |
+| 9  | Unit Price Trends | €/unit over time — isolates tariff changes from usage |
+| 10 | Line-Item Cost by Month | Stacked bars of every individual charge (last 12 months only, top 8 + "Other") |
+| 11 | Price vs Consumption Decomposition | Bennet-symmetric decomposition (price + volume sums exactly to total Δ) for the latest two months |
 | 12 | Month-vs-Month Comparison | Side-by-side table of two recent months with deltas |
+| 13 | Total Spend by Year | Bar chart + table — annual rollup at the **bill** level (each bill counted once even when split across categories) |
 
 ## Estonian translation coverage
 
@@ -327,32 +400,56 @@ Glossary (`backend/translation.py`) includes:
 
 ```
 backend/
-├── main.py              FastAPI app, auth, upload, analytics, community, BYOK endpoints
-├── db.py                SQLite/Postgres adapter (Supabase via DATABASE_URL)
-├── parser.py            Tesseract OCR + pdfplumber + regex + column detector
-├── parser_freellmapi.py FreeLLMAPI client for text-to-JSON extraction
-├── parser_byok.py       User-saved key extraction path
-├── byok.py              Provider catalogue + AES-GCM key encryption helpers
-├── auth.py              HMAC-signed app tokens carrying Google identity
-├── translation.py       180-term Estonian→English glossary + period parser
-├── seed_demo.py         Seed 3 sample bills without any API call
-├── render_preview.py    ASCII preview of the dashboard
-├── test_auth.py         Unit tests for token roundtrip, tampering, expiry
-├── test_claude_parser.py  Unit tests for the Claude parser branch
-├── test_parser.py       End-to-end test on synthetic PNG
-├── test_december.py     Validation on the December 2025 bill format
-└── test_pdf.py          Validation on native-text PDFs
+├── main.py                       FastAPI app, auth, upload, analytics, community,
+│                                 BYOK endpoints, no-store + auth middleware
+├── auth.py                       HMAC-signed app tokens carrying Google identity
+├── google_auth.py                Google ID-token verification + email allowlist
+├── byok.py                       Provider catalogue + AES-256-GCM key encryption helpers
+├── db.py                         SQLite/Postgres adapter (Supabase via DATABASE_URL)
+├── parser.py                     Tesseract OCR + pdfplumber + regex + column detector
+├── parser_openai_compat.py      Shared OpenAI-compatible HTTP client with retries,
+│                                 truncation detection, HTML-error sanitisation
+├── parser_freellmapi.py          FreeLLMAPI parser branch
+├── parser_byok.py                User-saved key parser branch (uses base_url_override)
+├── translation.py                ~180-term Estonian→English glossary + period parser
+├── seed_demo.py                  Seed 3 sample bills without any API call
+├── render_preview.py             ASCII preview of the dashboard
+├── test_auth.py                  App-token round-trip / tampering / expiry
+├── test_google_auth.py           Mocked Google ID-token verification
+├── test_byok.py                  BYOK encrypt/decrypt + endpoint coverage
+│                                 (create, edit, default, probe, custom URL, isolation)
+├── test_cross_user_isolation.py Bills + BYOK cross-user authorisation
+├── test_db_adapter.py            SQLite / Postgres adapter shape
+├── test_claude_parser.py         Claude parser branch unit tests
+├── test_parser.py                End-to-end test on synthetic PNG (manual smoke)
+├── test_december.py              Validation on December 2025 bill format (manual smoke)
+└── test_pdf.py                   Validation on native-text PDFs (manual smoke)
+
 frontend/
+├── public/
+│   ├── apple-touch-icon.png      180×180 home-screen icon (iOS PWA)
+│   ├── manifest.webmanifest      Installable PWA manifest
+│   └── favicon.svg
+├── index.html                    Apple PWA meta tags, theme-color (light/dark), viewport-fit
 └── src/
-    ├── App.tsx
-    ├── api.ts
+    ├── App.tsx                   Tab routing, sticky safe-top header, profile portal,
+    │                             auth callback bootstrap
+    ├── main.tsx                  consumeAuthCallback() before <App/> mounts
+    ├── api.ts                    Axios client + cache-busting on analytics fetches
+    ├── auth.ts                   Token storage + iOS redirect-callback handler
+    ├── google.ts                 Lazy GIS loader + iOS detection
+    ├── theme.ts                  light/dark/system theme hook
+    ├── styles/theme.css          CSS vars + .safe-top utility for iOS notch
     └── components/
-        ├── UploadTab.tsx       Drag-and-drop upload + extraction result
-        ├── BillsTab.tsx        List/edit/delete bills, per-bill detail view
-        ├── AnalyticsTab.tsx    12-section dashboard + Download PDF button
-        ├── CommunityTab.tsx    Community users, public bills and global insights
-        ├── SettingsTab.tsx     User-saved BYOK provider keys
-        └── HelpTab.tsx         Product help and glossary
+        ├── UploadTab.tsx         Drag-and-drop upload with parser-mode picker
+        ├── BillsTab.tsx          List/edit/delete bills, mobile action drawer,
+        │                         Intl-formatted upload timestamps
+        ├── AnalyticsTab.tsx      13-section dashboard + Download PDF + "Refreshing" pill
+        ├── CommunityTab.tsx      Per-user community dashboards
+        ├── SettingsTab.tsx       BYOK CRUD + Edit modal + Set-default + Test
+        ├── LoginScreen.tsx       Google Sign-In with iOS redirect-mode fallback
+        ├── ThemeToggle.tsx       Sun/moon/monitor cycle button
+        └── ErrorBoundary.tsx     Themed crash boundary
 ```
 
 ## PDF export
@@ -367,11 +464,14 @@ This utility app is open source and contributions are welcome. Good first contri
 
 - adding or improving Estonian utility-bill parsing examples,
 - expanding the translation glossary in `backend/translation.py`,
-- adding AI provider presets for BYOK extraction,
+- adding AI provider presets for BYOK extraction in `backend/byok.py`,
 - improving mobile UX, accessibility, and dashboard readability,
 - writing focused tests for parser or analytics edge cases.
 
-Fork the repo, create a branch, and send a pull request. The codebase is intentionally small: backend tests live in `backend/test_*.py`, and the frontend type-checks with `tsc --noEmit` and builds with `vite build`.
+Fork the repo, create a branch, and send a pull request. The codebase is intentionally small:
+
+- Backend tests: `cd backend && AUTH_SECRET=$(printf 'x%.0s' {1..64}) ./venv/bin/python -m pytest -q`
+- Frontend type-check + lint + build: `cd frontend && npx tsc --noEmit && npx eslint src --max-warnings=0 && npx vite build`
 
 ## License
 
