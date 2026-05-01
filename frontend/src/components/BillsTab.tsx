@@ -16,6 +16,53 @@ const TYPE_COLORS: Record<string, string> = {
   heating: "#ef4444", internet: "#8b5cf6", waste: "#6b7280", other: "#9ca3af",
 };
 
+/**
+ * Format a backend UTC ISO-8601 timestamp into the device's local
+ * timezone. Returns both an absolute string (e.g. "Apr 30, 2026, 11:42
+ * GMT+3") for tooltips / detail views, and a relative string (e.g. "3
+ * hours ago") for inline display.
+ *
+ * Uses Intl.* so the formatting follows the user's locale, calendar,
+ * and active timezone — no hardcoded "en-US" or "Europe/Tallinn".
+ */
+function fmtLocal(iso: string | null | undefined): { absolute: string; relative: string } | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+
+  const absolute = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZoneName: "short",
+  }).format(d);
+
+  const diffMs = d.getTime() - Date.now();
+  const absSec = Math.abs(diffMs) / 1000;
+  // Pick the largest unit whose threshold the elapsed delta clears so
+  // a 90-minute-old bill reads "an hour ago" rather than "90 minutes ago".
+  const units: ReadonlyArray<[Intl.RelativeTimeFormatUnit, number]> = [
+    ["year", 60 * 60 * 24 * 365],
+    ["month", 60 * 60 * 24 * 30],
+    ["week", 60 * 60 * 24 * 7],
+    ["day", 60 * 60 * 24],
+    ["hour", 60 * 60],
+    ["minute", 60],
+    ["second", 1],
+  ];
+  let unit: Intl.RelativeTimeFormatUnit = "second";
+  let secsPerUnit = 1;
+  for (const [u, s] of units) {
+    if (absSec >= s) {
+      unit = u;
+      secsPerUnit = s;
+      break;
+    }
+  }
+  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  const value = Math.round(diffMs / 1000 / secsPerUnit);
+  return { absolute, relative: rtf.format(value, unit) };
+}
+
 interface BillsTabProps {
   /** Called whenever the bill list mutates. Lets the parent invalidate
    * cached data on other tabs (Analytics / Community). */
@@ -325,9 +372,23 @@ export default function BillsTab({ onDataChange }: BillsTabProps = {}) {
                       </span>
                     )}
                   </div>
-                  <div style={{ fontSize: 12, color: "var(--text-2)", marginTop: 2 }}>
-                    {bill.bill_date ?? bill.upload_date?.slice(0, 10)}
-                    {bill.period_start && bill.period_end && !isMobile && ` · ${bill.period_start} → ${bill.period_end}`}
+                  <div style={{ fontSize: 12, color: "var(--text-2)", marginTop: 2, display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: 6 }}>
+                    <span>{bill.bill_date ?? bill.upload_date?.slice(0, 10)}</span>
+                    {bill.period_start && bill.period_end && !isMobile && (
+                      <span>· {bill.period_start} → {bill.period_end}</span>
+                    )}
+                    {(() => {
+                      const t = fmtLocal(bill.upload_date);
+                      if (!t) return null;
+                      return (
+                        <span
+                          title={`Uploaded ${t.absolute}`}
+                          style={{ color: "var(--text-3)", fontSize: 11, whiteSpace: "nowrap" }}
+                        >
+                          · uploaded {t.relative}
+                        </span>
+                      );
+                    })()}
                   </div>
                 </div>
                 <div style={{ textAlign: "right", flexShrink: 0 }}>
@@ -377,7 +438,7 @@ export default function BillsTab({ onDataChange }: BillsTabProps = {}) {
                       ["Account #", bill.account_number],
                       ["Address", bill.address],
                       ["Filename", bill.filename],
-                      ["Uploaded", bill.upload_date?.slice(0, 10)],
+                      ["Uploaded", fmtLocal(bill.upload_date)?.absolute],
                       ["Due Date", raw.due_date],
                       ["Period (EN)", raw.period_en ?? raw.period],
                       ["VAT", raw.vat_amount != null ? `€${raw.vat_amount}` : null],
