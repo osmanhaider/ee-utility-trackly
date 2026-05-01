@@ -17,12 +17,27 @@ def parse_bill_with_byok(
     provider_id: str,
     api_key: str,
     model: str | None = None,
+    base_url_override: str | None = None,
 ) -> dict:
     provider = PROVIDERS.get(provider_id)
     if provider is None:
         raise ByokError(f"Unknown BYOK provider: {provider_id!r}")
 
     chosen_model = model or provider.default_model
+    if not chosen_model:
+        raise ByokError(
+            "No model specified — set a default model on the saved key, or "
+            "pass one in the upload form."
+        )
+
+    # User-supplied URL wins; falls back to the provider preset for the
+    # well-known endpoints. `custom` and `ollama` presets ship with an
+    # empty preset URL so the override is mandatory there.
+    base_url = (base_url_override or provider.base_url or "").rstrip("/")
+    if not base_url:
+        raise ByokError(
+            f"{provider.name} requires a base URL — edit the key in Settings."
+        )
 
     extracted = extract_bill_text(file_path)
     invoice_text = extracted.text.strip()
@@ -33,7 +48,7 @@ def parse_bill_with_byok(
 
     parsed, _headers = call_openai_compat_chat(
         invoice_text,
-        base_url=provider.base_url,
+        base_url=base_url,
         api_key=api_key,
         model=chosen_model,
         source_name=provider.name,

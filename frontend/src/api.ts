@@ -72,6 +72,15 @@ export interface ByokProvider {
   default_model: string;
   key_hint: string;
   key_url: string;
+  /** Provider's preset endpoint, or "" for self-hosted providers
+   *  where the user supplies the URL. */
+  base_url: string;
+  /** True when the user must supply a base URL with their key
+   *  (custom / self-hosted, e.g. Ollama). */
+  requires_base_url: boolean;
+  /** True when the provider's /v1/models endpoint can be probed
+   *  without an API key (e.g. local Ollama with no auth). */
+  allows_empty_key: boolean;
 }
 
 export interface ByokKey {
@@ -80,7 +89,17 @@ export interface ByokKey {
   provider: string;
   masked_key: string;
   default_model: string | null;
+  /** User-supplied base URL override; null means "use provider preset". */
+  base_url_override: string | null;
+  /** True when this key is the per-provider default for the user. */
+  is_default: boolean;
   created_at: string;
+}
+
+export interface ByokProbeResult {
+  ok: boolean;
+  status: number;
+  message: string;
 }
 
 export interface AnalyticsSummary {
@@ -213,7 +232,21 @@ export const api = {
   listByokProviders: () =>
     axios.get<{ configured: boolean; providers: ByokProvider[] }>(`${BASE}/api/byok-providers`),
   listMyByokKeys: () => axios.get<ByokKey[]>(`${BASE}/api/byok-keys`),
-  addByokKey: (input: { label: string; provider: string; key: string; default_model?: string }) =>
-    axios.post<ByokKey>(`${BASE}/api/byok-keys`, input),
+  addByokKey: (input: {
+    label: string;
+    provider: string;
+    key: string;
+    default_model?: string;
+    base_url?: string;
+    is_default?: boolean;
+  }) => axios.post<ByokKey>(`${BASE}/api/byok-keys`, input),
+  updateByokKey: (
+    id: string,
+    input: { label?: string; default_model?: string | null; base_url?: string | null },
+  ) => axios.patch<{ status: string }>(`${BASE}/api/byok-keys/${id}`, input),
+  setDefaultByokKey: (id: string) =>
+    axios.post<{ status: string }>(`${BASE}/api/byok-keys/${id}/default`),
+  probeByokKey: (input: { provider: string; key?: string; base_url?: string }) =>
+    axios.post<ByokProbeResult>(`${BASE}/api/byok-keys/probe`, input),
   deleteByokKey: (id: string) => axios.delete(`${BASE}/api/byok-keys/${id}`),
 };

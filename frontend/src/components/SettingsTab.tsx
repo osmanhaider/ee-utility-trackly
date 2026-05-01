@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import axios from "axios";
 import {
   Key, Plus, Trash2, AlertCircle, Loader2, Eye, EyeOff,
-  CheckCircle, ExternalLink,
+  CheckCircle, ExternalLink, Star, Pencil, Wifi, X,
 } from "lucide-react";
 import { api, type ByokKey, type ByokProvider } from "../api";
 
@@ -23,6 +24,22 @@ const inputStyle: React.CSSProperties = {
   fontSize: 13,
 };
 
+interface ProbeState {
+  status: "idle" | "probing" | "ok" | "fail";
+  message?: string;
+  /** Snapshot of the inputs the probe ran against. Used to derive
+   *  staleness without a setState-in-effect: when the current inputs
+   *  diverge from this fingerprint, the badge is considered stale and
+   *  hidden. */
+  fingerprint?: string;
+}
+
+function probeFingerprint(provider: string, key: string, baseUrl: string): string {
+  // Order matters but the contents are joined with a control character
+  // that can't appear in a URL/key, so collisions are impossible.
+  return `${provider}\x00${key}\x00${baseUrl}`;
+}
+
 export default function SettingsTab() {
   const [providers, setProviders] = useState<ByokProvider[]>([]);
   const [configured, setConfigured] = useState(true);
@@ -35,10 +52,20 @@ export default function SettingsTab() {
   const [label, setLabel] = useState("");
   const [secret, setSecret] = useState("");
   const [model, setModel] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [isDefault, setIsDefault] = useState(false);
   const [showSecret, setShowSecret] = useState(false);
   const [saving, setSaving] = useState(false);
   const [formErr, setFormErr] = useState<string | null>(null);
   const [justAdded, setJustAdded] = useState<string | null>(null);
+  const [probe, setProbe] = useState<ProbeState>({ status: "idle" });
+
+  // Per-row test/default UI state
+  const [rowProbe, setRowProbe] = useState<Record<string, ProbeState>>({});
+  const [defaulting, setDefaulting] = useState<string | null>(null);
+
+  // Edit modal state
+  const [editing, setEditing] = useState<ByokKey | null>(null);
 
   const provider = useMemo(
     () => providers.find(p => p.id === providerId) ?? null,
@@ -56,6 +83,7 @@ export default function SettingsTab() {
         if (list.length > 0) {
           setProviderId(list[0].id);
           setModel(list[0].default_model);
+          setBaseUrl(list[0].base_url);
         }
         if (!provRes.data.configured) {
           setKeys([]);
@@ -80,7 +108,43 @@ export default function SettingsTab() {
   const onProviderChange = (id: string) => {
     setProviderId(id);
     const p = providers.find(prov => prov.id === id);
-    if (p) setModel(p.default_model);
+    if (p) {
+      setModel(p.default_model);
+      setBaseUrl(p.base_url);
+    }
+  };
+
+  // Hide a previous probe badge whenever the inputs diverge from what
+  // we tested — derived synchronously, no setState-in-effect needed.
+  const currentFingerprint = probeFingerprint(providerId, secret.trim(), baseUrl.trim());
+  const visibleProbe: ProbeState = (
+    probe.status === "probing"
+    || (probe.fingerprint != null && probe.fingerprint === currentFingerprint)
+  )
+    ? probe
+    : { status: "idle" };
+
+  const onProbe = async () => {
+    if (!provider) return;
+    const fp = currentFingerprint;
+    setProbe({ status: "probing", fingerprint: fp });
+    try {
+      const res = await api.probeByokKey({
+        provider: provider.id,
+        key: secret.trim() || undefined,
+        base_url: baseUrl.trim() || undefined,
+      });
+      setProbe({
+        status: res.data.ok ? "ok" : "fail",
+        message: res.data.message,
+        fingerprint: fp,
+      });
+    } catch (e) {
+      const msg = axios.isAxiosError(e)
+        ? ((e.response?.data as { detail?: string } | undefined)?.detail ?? e.message)
+        : "Network error.";
+      setProbe({ status: "fail", message: msg, fingerprint: fp });
+    }
   };
 
   const onAdd = async (e: React.FormEvent) => {
@@ -94,12 +158,24 @@ export default function SettingsTab() {
         label: label.trim(),
         key: secret.trim(),
         default_model: model.trim() || undefined,
+        base_url: baseUrl.trim() || undefined,
+        is_default: isDefault,
       });
-      setKeys(ks => [res.data, ...ks]);
+      // If the new row is default, demote local defaults for the same
+      // provider so the UI reflects what the server just wrote.
+      setKeys(ks => {
+        const others = isDefault
+          ? ks.map(k => k.provider === res.data.provider ? { ...k, is_default: false } : k)
+          : ks;
+        return [res.data, ...others];
+      });
       setLabel("");
       setSecret("");
       setShowSecret(false);
+      setIsDefault(false);
       setModel(provider.default_model);
+      setBaseUrl(provider.base_url);
+      setProbe({ status: "idle" });
       setJustAdded(res.data.id);
       setTimeout(() => setJustAdded(null), 2200);
     } catch (e) {
@@ -126,6 +202,61 @@ export default function SettingsTab() {
     }
   };
 
+  const onMakeDefault = async (key: ByokKey) => {
+    if (key.is_default) return;
+    setDefaulting(key.id);
+    const prev = keys;
+    // Optimistic: clear other defaults for this provider, set this one.
+    setKeys(ks => ks.map(k => {
+      if (k.provider !== key.provider) return k;
+      return { ...k, is_default: k.id === key.id };
+    }));
+    try {
+      await api.setDefaultByokKey(key.id);
+    } catch {
+      setKeys(prev);
+      alert("Couldn't set this key as the default.");
+    } finally {
+      setDefaulting(null);
+    }
+  };
+
+  const onTestSaved = async (key: ByokKey) => {
+    setRowProbe(p => ({ ...p, [key.id]: { status: "probing" } }));
+    try {
+      const res = await api.probeByokKey({
+        provider: key.provider,
+        // We can't send the saved key (we don't have plaintext); we rely
+        // on whatever the provider's /v1/models endpoint accepts. For
+        // most this means we get a 401 if the key is "wrong" — which is
+        // *exactly the signal we want* without ever seeing the key.
+        // For local/Ollama we also don't have the key.
+        // The probe endpoint is happy with no key supplied.
+        base_url: key.base_url_override ?? undefined,
+      });
+      setRowProbe(p => ({
+        ...p,
+        [key.id]: {
+          status: res.data.ok ? "ok" : "fail",
+          message: res.data.message,
+        },
+      }));
+    } catch (e) {
+      const msg = axios.isAxiosError(e)
+        ? ((e.response?.data as { detail?: string } | undefined)?.detail ?? e.message)
+        : "Network error.";
+      setRowProbe(p => ({ ...p, [key.id]: { status: "fail", message: msg } }));
+    }
+    // Auto-clear the row badge after 4s so it doesn't linger.
+    setTimeout(() => {
+      setRowProbe(p => {
+        const next = { ...p };
+        delete next[key.id];
+        return next;
+      });
+    }, 4000);
+  };
+
   const providerName = (id: string) =>
     providers.find(p => p.id === id)?.name ?? id;
 
@@ -148,7 +279,8 @@ export default function SettingsTab() {
         <p style={{ color: "var(--text-2)", margin: "4px 0 0", fontSize: 13, lineHeight: 1.55 }}>
           Optional: bring your own API keys for OpenAI-compatible providers. When configured,
           you can pick "Use my API key" on the Upload tab and bills are extracted directly
-          via your account — no FreeLLMAPI router involved.
+          via your account — no FreeLLMAPI router involved. Self-hosted endpoints (Ollama,
+          custom gateways) are also supported via the Custom provider.
         </p>
       </div>
 
@@ -209,80 +341,125 @@ export default function SettingsTab() {
         </div>
       ) : (
         <div className="list-stagger" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {keys.map((k, i) => (
-            <div
-              key={k.id}
-              className="lift"
-              style={{
-                ...cardStyle,
-                padding: "12px 16px",
-                display: "flex",
-                alignItems: "center",
-                gap: 12,
-                ["--i" as string]: i,
-                outline: justAdded === k.id ? "2px solid var(--accent)" : undefined,
-                outlineOffset: -1,
-              } as React.CSSProperties}
-            >
+          {keys.map((k, i) => {
+            const rp = rowProbe[k.id];
+            return (
               <div
+                key={k.id}
+                className="lift"
                 style={{
-                  width: 36, height: 36, borderRadius: 8,
-                  background: "var(--accent-soft)", color: "var(--accent)",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  flexShrink: 0,
-                }}
-              >
-                <Key size={16} />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span style={{ fontWeight: 600, color: "var(--text-1)", fontSize: 13 }}>
-                    {k.label}
-                  </span>
-                  <span
-                    style={{
-                      fontSize: 11,
-                      padding: "2px 8px",
-                      borderRadius: 999,
-                      background: "var(--surface-2)",
-                      border: "1px solid var(--border)",
-                      color: "var(--text-2)",
-                    }}
-                  >
-                    {providerName(k.provider)}
-                  </span>
-                  {justAdded === k.id && (
-                    <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--success)", fontSize: 11 }}>
-                      <CheckCircle size={12} /> Added
-                    </span>
-                  )}
-                </div>
-                <div style={{ fontSize: 12, color: "var(--text-2)", marginTop: 2, fontFamily: "ui-monospace, SFMono-Regular, monospace" }}>
-                  {k.masked_key}
-                  {k.default_model ? <span style={{ color: "var(--text-3)" }}> · {k.default_model}</span> : null}
-                </div>
-              </div>
-              <button
-                onClick={() => onDelete(k)}
-                title="Delete key"
-                className="btn-press"
-                style={{
-                  background: "transparent",
-                  border: "1px solid var(--border)",
-                  borderRadius: 8,
-                  color: "var(--text-3)",
-                  padding: "6px 8px",
-                  cursor: "pointer",
+                  ...cardStyle,
+                  padding: "12px 16px",
                   display: "flex",
                   alignItems: "center",
-                  gap: 6,
-                  fontSize: 12,
-                }}
+                  gap: 12,
+                  ["--i" as string]: i,
+                  outline: justAdded === k.id ? "2px solid var(--accent)" : undefined,
+                  outlineOffset: -1,
+                } as React.CSSProperties}
               >
-                <Trash2 size={13} />
-              </button>
-            </div>
-          ))}
+                <button
+                  type="button"
+                  onClick={() => onMakeDefault(k)}
+                  title={k.is_default ? "Default for this provider" : "Set as default for this provider"}
+                  className="btn-press"
+                  disabled={defaulting === k.id}
+                  style={{
+                    width: 36, height: 36, borderRadius: 8,
+                    background: k.is_default ? "var(--accent-soft)" : "var(--surface-2)",
+                    color: k.is_default ? "var(--accent)" : "var(--text-3)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    flexShrink: 0,
+                    border: k.is_default ? "1px solid var(--accent)" : "1px solid var(--border)",
+                    cursor: defaulting === k.id ? "wait" : "pointer",
+                  }}
+                >
+                  {defaulting === k.id
+                    ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
+                    : <Star size={14} fill={k.is_default ? "currentColor" : "none"} />}
+                </button>
+
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontWeight: 600, color: "var(--text-1)", fontSize: 13 }}>
+                      {k.label}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        padding: "2px 8px",
+                        borderRadius: 999,
+                        background: "var(--surface-2)",
+                        border: "1px solid var(--border)",
+                        color: "var(--text-2)",
+                      }}
+                    >
+                      {providerName(k.provider)}
+                    </span>
+                    {k.is_default && (
+                      <span style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", fontSize: 11, fontWeight: 600 }}>
+                        <Star size={11} fill="currentColor" /> default
+                      </span>
+                    )}
+                    {justAdded === k.id && (
+                      <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--success)", fontSize: 11 }}>
+                        <CheckCircle size={12} /> Added
+                      </span>
+                    )}
+                    {rp && (
+                      <span style={{
+                        display: "flex", alignItems: "center", gap: 4,
+                        color: rp.status === "ok" ? "var(--success)"
+                          : rp.status === "fail" ? "var(--danger)"
+                            : "var(--text-2)",
+                        fontSize: 11, fontWeight: 600,
+                      }}>
+                        {rp.status === "probing"
+                          ? <Loader2 size={11} style={{ animation: "spin 1s linear infinite" }} />
+                          : rp.status === "ok"
+                            ? <CheckCircle size={11} />
+                            : <AlertCircle size={11} />}
+                        {rp.status === "probing" ? "Testing…" : rp.message}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--text-2)", marginTop: 2, fontFamily: "ui-monospace, SFMono-Regular, monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {k.masked_key}
+                    {k.default_model ? <span style={{ color: "var(--text-3)" }}> · {k.default_model}</span> : null}
+                    {k.base_url_override ? <span style={{ color: "var(--text-3)" }}> · {k.base_url_override}</span> : null}
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                  <button
+                    onClick={() => onTestSaved(k)}
+                    title="Test connection"
+                    className="btn-press"
+                    disabled={rp?.status === "probing"}
+                    style={iconBtnStyle}
+                  >
+                    <Wifi size={13} />
+                  </button>
+                  <button
+                    onClick={() => setEditing(k)}
+                    title="Edit"
+                    className="btn-press"
+                    style={iconBtnStyle}
+                  >
+                    <Pencil size={13} />
+                  </button>
+                  <button
+                    onClick={() => onDelete(k)}
+                    title="Delete key"
+                    className="btn-press"
+                    style={iconBtnStyle}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -318,9 +495,25 @@ export default function SettingsTab() {
           </label>
         </div>
 
+        {provider?.requires_base_url && (
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 12, color: "var(--text-2)" }}>
+              Base URL <span style={{ color: "var(--text-3)" }}>(required for {provider.name})</span>
+            </span>
+            <input
+              type="url"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder={provider.id === "ollama" ? "https://your-host:11434/v1" : "https://endpoint/v1"}
+              disabled={saving}
+              style={{ ...inputStyle, fontFamily: "ui-monospace, SFMono-Regular, monospace" }}
+            />
+          </label>
+        )}
+
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={{ fontSize: 12, color: "var(--text-2)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span>API key</span>
+            <span>API key {provider?.allows_empty_key && <span style={{ color: "var(--text-3)" }}>(optional)</span>}</span>
             {provider?.key_url && (
               <a
                 href={provider.key_url}
@@ -367,15 +560,27 @@ export default function SettingsTab() {
 
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={{ fontSize: 12, color: "var(--text-2)" }}>
-            Default model {provider ? <span style={{ color: "var(--text-3)" }}>(prefilled from {provider.name})</span> : null}
+            Default model {provider && provider.default_model ? <span style={{ color: "var(--text-3)" }}>(prefilled from {provider.name})</span> : null}
           </span>
           <input
             type="text"
             value={model}
             onChange={(e) => setModel(e.target.value)}
+            placeholder={provider?.id === "custom" ? "model id, e.g. anthropic/claude-sonnet-4-6" : ""}
             disabled={saving}
             style={{ ...inputStyle, fontFamily: "ui-monospace, SFMono-Regular, monospace" }}
           />
+        </label>
+
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text-2)" }}>
+          <input
+            type="checkbox"
+            checked={isDefault}
+            onChange={(e) => setIsDefault(e.target.checked)}
+            disabled={saving}
+            style={{ cursor: "pointer" }}
+          />
+          <span>Make this the default key for {provider?.name ?? "this provider"}</span>
         </label>
 
         {formErr && (
@@ -384,10 +589,59 @@ export default function SettingsTab() {
           </div>
         )}
 
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        {visibleProbe.status !== "idle" && (
+          <div style={{
+            color: visibleProbe.status === "ok" ? "var(--success)"
+              : visibleProbe.status === "fail" ? "var(--danger)"
+                : "var(--text-2)",
+            fontSize: 12,
+            display: "flex", alignItems: "center", gap: 6,
+            background: visibleProbe.status === "ok"
+              ? "var(--accent-soft)"
+              : visibleProbe.status === "fail"
+                ? "var(--danger-soft)"
+                : "transparent",
+            padding: visibleProbe.status === "probing" ? 0 : "8px 10px",
+            borderRadius: 8,
+          }}>
+            {visibleProbe.status === "probing"
+              ? <><Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> Testing connection…</>
+              : visibleProbe.status === "ok"
+                ? <><CheckCircle size={13} /> {visibleProbe.message}</>
+                : <><AlertCircle size={13} /> {visibleProbe.message}</>}
+          </div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={onProbe}
+            disabled={
+              saving
+              || !configured
+              || !provider
+              || (!provider.allows_empty_key && !secret.trim())
+              || (provider.requires_base_url && !baseUrl.trim())
+              ||               visibleProbe.status === "probing"
+            }
+            className="btn-press"
+            style={secondaryBtnStyle}
+          >
+            {visibleProbe.status === "probing"
+              ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
+              : <Wifi size={14} />}
+            Test connection
+          </button>
           <button
             type="submit"
-            disabled={saving || !configured || !label.trim() || !secret.trim() || !provider}
+            disabled={
+              saving
+              || !configured
+              || !label.trim()
+              || !provider
+              || (!provider.allows_empty_key && !secret.trim())
+              || (provider.requires_base_url && !baseUrl.trim())
+            }
             className="btn-press"
             style={{
               display: "flex",
@@ -418,6 +672,275 @@ export default function SettingsTab() {
         Plaintext never leaves the backend, and listings only return masked values.
         In production they persist in Supabase/Postgres alongside your bills.
       </p>
+
+      {editing && (
+        <EditKeyModal
+          k={editing}
+          provider={providers.find(p => p.id === editing.provider) ?? null}
+          onClose={() => setEditing(null)}
+          onSaved={(updated) => {
+            setKeys(ks => ks.map(k => k.id === updated.id ? { ...k, ...updated } : k));
+            setEditing(null);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+const iconBtnStyle: React.CSSProperties = {
+  background: "transparent",
+  border: "1px solid var(--border)",
+  borderRadius: 8,
+  color: "var(--text-3)",
+  padding: "6px 8px",
+  cursor: "pointer",
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  fontSize: 12,
+};
+
+const secondaryBtnStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  padding: "8px 14px",
+  borderRadius: 8,
+  border: "1px solid var(--border)",
+  background: "transparent",
+  color: "var(--text-1)",
+  fontSize: 13,
+  cursor: "pointer",
+};
+
+interface EditModalProps {
+  k: ByokKey;
+  provider: ByokProvider | null;
+  onClose: () => void;
+  onSaved: (patch: Partial<ByokKey> & { id: string }) => void;
+}
+
+// Portalled to <body> to escape any ancestor containers and keep the
+// fixed-position scrim covering the whole viewport on mobile.
+function EditKeyModal({ k, provider, onClose, onSaved }: EditModalProps) {
+  const [label, setLabel] = useState(k.label);
+  const [model, setModel] = useState(k.default_model ?? "");
+  const [baseUrl, setBaseUrl] = useState(k.base_url_override ?? "");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [probe, setProbe] = useState<ProbeState>({ status: "idle" });
+
+  // Esc closes; click-outside on scrim closes too (handled below).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const onTest = async () => {
+    if (!provider) return;
+    setProbe({ status: "probing" });
+    try {
+      const res = await api.probeByokKey({
+        provider: k.provider,
+        base_url: baseUrl.trim() || undefined,
+      });
+      setProbe({
+        status: res.data.ok ? "ok" : "fail",
+        message: res.data.message,
+      });
+    } catch (e) {
+      const msg = axios.isAxiosError(e)
+        ? ((e.response?.data as { detail?: string } | undefined)?.detail ?? e.message)
+        : "Network error.";
+      setProbe({ status: "fail", message: msg });
+    }
+  };
+
+  const onSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setErr(null);
+    const trimmedLabel = label.trim();
+    const trimmedModel = model.trim();
+    const trimmedUrl = baseUrl.trim();
+    const patch: { label?: string; default_model?: string | null; base_url?: string | null } = {};
+    if (trimmedLabel !== k.label) patch.label = trimmedLabel;
+    if (trimmedModel !== (k.default_model ?? "")) patch.default_model = trimmedModel || null;
+    if (trimmedUrl !== (k.base_url_override ?? "")) patch.base_url = trimmedUrl || null;
+
+    if (Object.keys(patch).length === 0) {
+      onClose();
+      return;
+    }
+    try {
+      await api.updateByokKey(k.id, patch);
+      onSaved({
+        id: k.id,
+        label: trimmedLabel,
+        default_model: trimmedModel || null,
+        base_url_override: trimmedUrl || null,
+      });
+    } catch (e) {
+      const msg = axios.isAxiosError(e)
+        ? ((e.response?.data as { detail?: string } | undefined)?.detail ?? "Couldn't save changes.")
+        : "Network error.";
+      setErr(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Edit ${k.label}`}
+      style={{
+        position: "fixed", inset: 0, zIndex: 1000,
+        background: "rgba(0,0,0,0.55)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 16,
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <form
+        onSubmit={onSave}
+        style={{
+          width: "100%", maxWidth: 480,
+          background: "var(--surface-1)",
+          border: "1px solid var(--border)",
+          borderRadius: 14,
+          padding: 20,
+          display: "flex", flexDirection: "column", gap: 12,
+          boxShadow: "var(--shadow-lg)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <h3 style={{ margin: 0, color: "var(--text-1)", fontSize: 16 }}>
+            Edit “{k.label}”
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            style={{ background: "transparent", border: "none", color: "var(--text-3)", cursor: "pointer", padding: 4 }}
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <p style={{ color: "var(--text-3)", fontSize: 12, margin: 0, lineHeight: 1.5 }}>
+          The encrypted key value isn't editable here — to rotate it, delete and re-add.
+        </p>
+
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 12, color: "var(--text-2)" }}>Label</span>
+          <input
+            type="text"
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            disabled={saving}
+            style={inputStyle}
+          />
+        </label>
+
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 12, color: "var(--text-2)" }}>Default model</span>
+          <input
+            type="text"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            disabled={saving}
+            style={{ ...inputStyle, fontFamily: "ui-monospace, SFMono-Regular, monospace" }}
+          />
+        </label>
+
+        {(provider?.requires_base_url || !!k.base_url_override) && (
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 12, color: "var(--text-2)" }}>
+              Base URL {provider?.requires_base_url && <span style={{ color: "var(--text-3)" }}>(required)</span>}
+            </span>
+            <input
+              type="url"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder="https://endpoint/v1"
+              disabled={saving}
+              style={{ ...inputStyle, fontFamily: "ui-monospace, SFMono-Regular, monospace" }}
+            />
+          </label>
+        )}
+
+        {err && (
+          <div style={{ color: "var(--danger)", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+            <AlertCircle size={13} /> {err}
+          </div>
+        )}
+
+        {probe.status !== "idle" && probe.status !== "probing" && (
+          <div style={{
+            color: probe.status === "ok" ? "var(--success)" : "var(--danger)",
+            fontSize: 12, display: "flex", alignItems: "center", gap: 6,
+            background: probe.status === "ok" ? "var(--accent-soft)" : "var(--danger-soft)",
+            padding: "8px 10px", borderRadius: 8,
+          }}>
+            {probe.status === "ok" ? <CheckCircle size={13} /> : <AlertCircle size={13} />}
+            {probe.message}
+          </div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 4 }}>
+          <button
+            type="button"
+            onClick={onTest}
+            disabled={saving || probe.status === "probing"
+              || (provider?.requires_base_url && !baseUrl.trim())}
+            className="btn-press"
+            style={secondaryBtnStyle}
+          >
+            {probe.status === "probing"
+              ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
+              : <Wifi size={14} />}
+            Test
+          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={saving}
+              className="btn-press"
+              style={secondaryBtnStyle}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={saving || !label.trim()
+                || (provider?.requires_base_url && !baseUrl.trim())}
+              className="btn-press"
+              style={{
+                display: "flex", alignItems: "center", gap: 6,
+                padding: "8px 14px", borderRadius: 8, border: "none",
+                background: "var(--accent)",
+                color: "var(--text-on-accent)",
+                fontWeight: 600, fontSize: 13,
+                cursor: saving ? "not-allowed" : "pointer",
+                opacity: saving ? 0.7 : 1,
+              }}
+            >
+              {saving
+                ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
+                : <CheckCircle size={14} />}
+              Save changes
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>,
+    document.body,
   );
 }

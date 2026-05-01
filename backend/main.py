@@ -132,6 +132,8 @@ async def _init_sqlite(db) -> None:
             iv TEXT NOT NULL,
             tag TEXT NOT NULL,
             default_model TEXT,
+            base_url_override TEXT,
+            is_default INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             UNIQUE(user_id, label)
         )
@@ -146,6 +148,15 @@ async def _init_sqlite(db) -> None:
     if "is_private" not in cols:
         await db.execute("ALTER TABLE bills ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0")
     await db.execute("CREATE INDEX IF NOT EXISTS bills_user_id_idx ON bills(user_id)")
+    # Backfill columns added after the original BYOK schema went out.
+    async with db.execute("PRAGMA table_info(user_api_keys)") as c:
+        key_cols = {row[1] for row in await c.fetchall()}
+    if "base_url_override" not in key_cols:
+        await db.execute("ALTER TABLE user_api_keys ADD COLUMN base_url_override TEXT")
+    if "is_default" not in key_cols:
+        await db.execute(
+            "ALTER TABLE user_api_keys ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 async def _init_postgres(db) -> None:
@@ -189,12 +200,18 @@ async def _init_postgres(db) -> None:
             iv TEXT NOT NULL,
             tag TEXT NOT NULL,
             default_model TEXT,
+            base_url_override TEXT,
+            is_default BOOLEAN NOT NULL DEFAULT false,
             created_at TEXT NOT NULL,
             UNIQUE(user_id, label)
         )
     """)
     await db.execute("ALTER TABLE bills ADD COLUMN IF NOT EXISTS user_id TEXT")
     await db.execute("ALTER TABLE bills ADD COLUMN IF NOT EXISTS is_private BOOLEAN NOT NULL DEFAULT false")
+    await db.execute("ALTER TABLE user_api_keys ADD COLUMN IF NOT EXISTS base_url_override TEXT")
+    await db.execute(
+        "ALTER TABLE user_api_keys ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT false"
+    )
     await db.execute("CREATE INDEX IF NOT EXISTS bills_user_id_idx ON bills(user_id)")
     await db.execute("CREATE INDEX IF NOT EXISTS user_api_keys_user_id_idx ON user_api_keys(user_id)")
 
@@ -793,6 +810,7 @@ async def _parse_uploaded_bill(
             provider_id=byok_row["provider"],
             api_key=plaintext_key,
             model=model or byok_row.get("default_model"),
+            base_url_override=byok_row.get("base_url_override"),
         )
     return await asyncio.to_thread(parse_bill_tesseract, save_path)
 
@@ -1431,7 +1449,8 @@ async def _resolve_byok_key(user_id: str, key_id: str) -> dict:
     _require_byok_configured()
     async with _db() as db:
         async with db.execute(
-            "SELECT id, user_id, label, provider, encrypted_key, iv, tag, default_model "
+            "SELECT id, user_id, label, provider, encrypted_key, iv, tag, "
+            "default_model, base_url_override "
             "FROM user_api_keys WHERE id = ? AND user_id = ?",
             (key_id, user_id),
         ) as c:
@@ -1441,11 +1460,41 @@ async def _resolve_byok_key(user_id: str, key_id: str) -> dict:
     return dict(row)
 
 
+def _resolve_base_url(provider_id: str, override: str | None) -> str:
+    """Pick the base URL for a key: the user's override wins, otherwise the
+    provider's preset. Raises 422 when both are missing (custom providers)."""
+    override = (override or "").strip()
+    provider = byok_mod.PROVIDERS.get(provider_id)
+    base = override or (provider.base_url if provider else "")
+    if not base:
+        raise HTTPException(
+            422,
+            "This key has no base URL. Add one (Settings → Edit) — required "
+            "for custom / self-hosted providers like Ollama.",
+        )
+    return base.rstrip("/")
+
+
 class ByokKeyCreate(BaseModel):
     label: str
     provider: str
     key: str
     default_model: str | None = None
+    base_url: str | None = None
+    is_default: bool = False
+
+
+class ByokKeyUpdate(BaseModel):
+    """All fields optional — server applies the ones that are present."""
+    label: str | None = None
+    default_model: str | None = None
+    base_url: str | None = None
+
+
+class ByokProbeRequest(BaseModel):
+    provider: str
+    key: str | None = None
+    base_url: str | None = None
 
 
 @app.get("/api/byok-providers")
@@ -1460,6 +1509,9 @@ async def byok_providers(_user_id: str = Depends(get_user_id)):
                 "default_model": p.default_model,
                 "key_hint": p.key_hint,
                 "key_url": p.key_url,
+                "base_url": p.base_url,
+                "requires_base_url": p.requires_base_url,
+                "allows_empty_key": p.allows_empty_key,
             }
             for p in byok_mod.PROVIDERS.values()
         ],
@@ -1472,8 +1524,10 @@ async def byok_keys_list(user_id: str = Depends(get_user_id)):
     _require_byok_configured()
     async with _db() as db:
         async with db.execute(
-            "SELECT id, label, provider, encrypted_key, iv, tag, default_model, created_at "
-            "FROM user_api_keys WHERE user_id = ? ORDER BY created_at DESC",
+            "SELECT id, label, provider, encrypted_key, iv, tag, default_model, "
+            "base_url_override, is_default, created_at "
+            "FROM user_api_keys WHERE user_id = ? "
+            "ORDER BY is_default DESC, created_at DESC",
             (user_id,),
         ) as c:
             rows = await c.fetchall()
@@ -1490,6 +1544,8 @@ async def byok_keys_list(user_id: str = Depends(get_user_id)):
             "provider": row["provider"],
             "masked_key": masked,
             "default_model": row["default_model"],
+            "base_url_override": row["base_url_override"],
+            "is_default": bool(row["is_default"]),
             "created_at": row["created_at"],
         })
     return out
@@ -1501,14 +1557,23 @@ async def byok_keys_create(
     user_id: str = Depends(get_user_id),
 ):
     _require_byok_configured()
-    if body.provider not in byok_mod.PROVIDERS:
+    provider = byok_mod.PROVIDERS.get(body.provider)
+    if provider is None:
         raise HTTPException(400, f"Unknown provider: {body.provider!r}")
     label = body.label.strip()
     plain = body.key.strip()
+    base_url = (body.base_url or "").strip()
     if not label:
         raise HTTPException(400, "Label is required.")
-    if len(plain) < 8:
+    if not provider.allows_empty_key and len(plain) < 8:
         raise HTTPException(400, "API key looks too short to be valid.")
+    if provider.requires_base_url and not base_url:
+        raise HTTPException(
+            400,
+            f"{provider.name} requires a base URL (e.g. https://your-host/v1).",
+        )
+    if base_url and not (base_url.startswith("http://") or base_url.startswith("https://")):
+        raise HTTPException(400, "Base URL must start with http:// or https://.")
 
     try:
         ct, iv, tag = byok_mod.encrypt(plain)
@@ -1519,14 +1584,25 @@ async def byok_keys_create(
     now = datetime.now(timezone.utc).isoformat()
     try:
         async with _db() as db:
+            # When the new key is marked as the default, atomically demote
+            # any existing default for the same (user, provider) so we
+            # don't end up with two defaults.
+            if body.is_default:
+                await db.execute(
+                    "UPDATE user_api_keys SET is_default = ? "
+                    "WHERE user_id = ? AND provider = ?",
+                    (False, user_id, body.provider),
+                )
             await db.execute(
                 """
                 INSERT INTO user_api_keys
-                    (id, user_id, label, provider, encrypted_key, iv, tag, default_model, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, user_id, label, provider, encrypted_key, iv, tag,
+                     default_model, base_url_override, is_default, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (new_id, user_id, label, body.provider, ct, iv, tag,
-                 (body.default_model or "").strip() or None, now),
+                 (body.default_model or "").strip() or None,
+                 base_url or None, bool(body.is_default), now),
             )
             await db.commit()
     except db_mod.IntegrityError as e:
@@ -1538,7 +1614,150 @@ async def byok_keys_create(
         "provider": body.provider,
         "masked_key": byok_mod.mask_key(plain),
         "default_model": (body.default_model or "").strip() or None,
+        "base_url_override": base_url or None,
+        "is_default": bool(body.is_default),
         "created_at": now,
+    }
+
+
+@app.patch("/api/byok-keys/{key_id}")
+async def byok_keys_update(
+    key_id: str,
+    body: ByokKeyUpdate,
+    user_id: str = Depends(get_user_id),
+):
+    """Edit a saved key's label / default model / base URL. The encrypted
+    key value itself isn't editable — delete + re-add to rotate it."""
+    _require_byok_configured()
+
+    sets: list[str] = []
+    args: list = []
+
+    if body.label is not None:
+        new_label = body.label.strip()
+        if not new_label:
+            raise HTTPException(400, "Label can't be empty.")
+        sets.append("label = ?")
+        args.append(new_label)
+    if body.default_model is not None:
+        new_model = body.default_model.strip() or None
+        sets.append("default_model = ?")
+        args.append(new_model)
+    if body.base_url is not None:
+        new_url = body.base_url.strip()
+        if new_url and not (new_url.startswith("http://") or new_url.startswith("https://")):
+            raise HTTPException(400, "Base URL must start with http:// or https://.")
+        sets.append("base_url_override = ?")
+        args.append(new_url or None)
+
+    if not sets:
+        raise HTTPException(400, "No fields to update.")
+
+    args.extend([key_id, user_id])
+    try:
+        async with _db() as db:
+            async with db.execute(
+                f"UPDATE user_api_keys SET {', '.join(sets)} "
+                "WHERE id = ? AND user_id = ?",
+                tuple(args),
+            ) as c:
+                affected = c.rowcount
+            await db.commit()
+    except db_mod.IntegrityError as e:
+        raise HTTPException(
+            409,
+            f"Another key already uses the label {body.label!r}.",
+        ) from e
+    if affected == 0:
+        raise HTTPException(404, "API key not found.")
+    return {"status": "updated"}
+
+
+@app.post("/api/byok-keys/{key_id}/default")
+async def byok_keys_set_default(
+    key_id: str,
+    user_id: str = Depends(get_user_id),
+):
+    """Mark a key as the default for its provider. Atomically demotes any
+    existing default for the same (user, provider) so there's exactly
+    one default per provider per user."""
+    _require_byok_configured()
+    async with _db() as db:
+        async with db.execute(
+            "SELECT provider FROM user_api_keys WHERE id = ? AND user_id = ?",
+            (key_id, user_id),
+        ) as c:
+            row = await c.fetchone()
+        if not row:
+            raise HTTPException(404, "API key not found.")
+        provider = row["provider"]
+        await db.execute(
+            "UPDATE user_api_keys SET is_default = ? "
+            "WHERE user_id = ? AND provider = ?",
+            (False, user_id, provider),
+        )
+        await db.execute(
+            "UPDATE user_api_keys SET is_default = ? WHERE id = ? AND user_id = ?",
+            (True, key_id, user_id),
+        )
+        await db.commit()
+    return {"status": "default-set"}
+
+
+@app.post("/api/byok-keys/probe")
+async def byok_keys_probe(
+    body: ByokProbeRequest,
+    _user_id: str = Depends(get_user_id),
+):
+    """Fire a one-shot GET /models against the provider/base-url to verify
+    that a (would-be) saved key can actually authenticate. Doesn't store
+    anything — purely a connectivity check used by the Settings UI."""
+    _require_byok_configured()
+    provider = byok_mod.PROVIDERS.get(body.provider)
+    if provider is None:
+        raise HTTPException(400, f"Unknown provider: {body.provider!r}")
+    base = (body.base_url or "").strip() or provider.base_url
+    base = base.rstrip("/")
+    if not base:
+        raise HTTPException(400, "Base URL is required for this provider.")
+    if not (base.startswith("http://") or base.startswith("https://")):
+        raise HTTPException(400, "Base URL must start with http:// or https://.")
+
+    key = (body.key or "").strip()
+    headers = {"Accept": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{base}/models", headers=headers)
+    except httpx.RequestError as e:
+        return {
+            "ok": False,
+            "status": 0,
+            "message": f"Couldn't reach {base}: {e.__class__.__name__}",
+        }
+
+    if r.status_code == 200:
+        # Try to peek at how many models the endpoint reports — purely
+        # informational, ignore parse failures.
+        models_count: int | None = None
+        try:
+            data = r.json()
+            if isinstance(data, dict) and isinstance(data.get("data"), list):
+                models_count = len(data["data"])
+        except Exception:
+            pass
+        msg = "Connection OK."
+        if models_count is not None:
+            msg = f"Connection OK · {models_count} models available."
+        return {"ok": True, "status": 200, "message": msg}
+
+    snippet = (r.text or "")[:200].strip()
+    return {
+        "ok": False,
+        "status": r.status_code,
+        "message": f"HTTP {r.status_code}: {snippet}" if snippet else f"HTTP {r.status_code}",
     }
 
 

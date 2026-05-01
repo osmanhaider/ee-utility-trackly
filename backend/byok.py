@@ -22,6 +22,15 @@ class Provider:
     default_model: str
     key_hint: str
     key_url: str
+    # When True, the user must supply a base URL when adding a key with
+    # this provider (e.g. self-hosted Ollama / OpenClaw / any custom
+    # OpenAI-compatible gateway). The presets below leave this False
+    # since their endpoints are well-known.
+    requires_base_url: bool = False
+    # When True, the provider's `/v1/models` endpoint is publicly
+    # reachable without authentication, so the probe button can talk to
+    # it without a key. Useful for local Ollama (no auth by default).
+    allows_empty_key: bool = False
 
 
 PROVIDERS: Final[dict[str, Provider]] = {
@@ -97,6 +106,25 @@ PROVIDERS: Final[dict[str, Provider]] = {
             default_model="z-ai/glm4.7",
             key_hint="Starts with nvapi-",
             key_url="https://build.nvidia.com/settings/api-keys",
+        ),
+        Provider(
+            id="ollama",
+            name="Ollama (self-hosted)",
+            base_url="",  # user-supplied; e.g. https://ollama.example.com/v1
+            default_model="llama3.1:8b",
+            key_hint="Often blank — Ollama doesn't auth by default",
+            key_url="https://ollama.com/download",
+            requires_base_url=True,
+            allows_empty_key=True,
+        ),
+        Provider(
+            id="custom",
+            name="Custom (OpenAI-compatible)",
+            base_url="",  # user-supplied
+            default_model="",
+            key_hint="API key for your endpoint",
+            key_url="",
+            requires_base_url=True,
         ),
     ]
 }

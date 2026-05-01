@@ -186,10 +186,263 @@ def test_other_user_cannot_list_or_use_keys(client):
     # Bob's listing is empty.
     assert c.get("/api/byok-keys", headers=bob).json() == []
 
-    # Bob can't delete Alice's key.
+    # Bob can't delete, edit, or set-default Alice's key.
     bob_delete = c.delete(f"/api/byok-keys/{alice_key_id}", headers=bob)
     assert bob_delete.status_code == 404
+    bob_edit = c.patch(
+        f"/api/byok-keys/{alice_key_id}",
+        headers=bob,
+        json={"label": "stolen"},
+    )
+    assert bob_edit.status_code == 404
+    bob_default = c.post(f"/api/byok-keys/{alice_key_id}/default", headers=bob)
+    assert bob_default.status_code == 404
 
-    # And the key is still around for Alice.
+    # And the key is still around for Alice, untouched.
     alice_listed = c.get("/api/byok-keys", headers=alice).json()
     assert len(alice_listed) == 1
+    assert alice_listed[0]["label"] == "personal"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Custom / self-hosted base-URL providers
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_custom_provider_requires_base_url(client):
+    main_mod, c = client
+    headers = _bearer(main_mod, "alice", "a@x.com")
+    r = c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={"label": "self-hosted", "provider": "custom", "key": "any-key-here-12345"},
+    )
+    assert r.status_code == 400
+    assert "base url" in r.json()["detail"].lower()
+
+
+def test_custom_provider_accepts_base_url(client):
+    main_mod, c = client
+    headers = _bearer(main_mod, "alice", "a@x.com")
+    r = c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={
+            "label": "openclaw",
+            "provider": "custom",
+            "key": "any-key-here-12345",
+            "base_url": "https://gateway.example.com/v1",
+            "default_model": "anthropic/claude-sonnet-4-6",
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["base_url_override"] == "https://gateway.example.com/v1"
+    assert body["default_model"] == "anthropic/claude-sonnet-4-6"
+
+
+def test_ollama_allows_empty_key(client):
+    """Ollama doesn't auth by default; a 'short' key shouldn't block save."""
+    main_mod, c = client
+    headers = _bearer(main_mod, "alice", "a@x.com")
+    r = c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={
+            "label": "local",
+            "provider": "ollama",
+            "key": "x",  # would normally fail the >=8 chars check
+            "base_url": "http://localhost:11434/v1",
+        },
+    )
+    assert r.status_code == 201, r.text
+
+
+def test_invalid_base_url_scheme_rejected(client):
+    main_mod, c = client
+    headers = _bearer(main_mod, "alice", "a@x.com")
+    r = c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={
+            "label": "bad",
+            "provider": "custom",
+            "key": "any-key-here-12345",
+            "base_url": "ftp://example.com/v1",
+        },
+    )
+    assert r.status_code == 400
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Default-key per provider
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_default_flag_persists_and_lists_first(client):
+    main_mod, c = client
+    headers = _bearer(main_mod, "alice", "a@x.com")
+    c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={"label": "first", "provider": "groq", "key": "gsk_firstkey1234567890"},
+    )
+    second = c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={
+            "label": "second",
+            "provider": "groq",
+            "key": "gsk_secondkey1234567890",
+            "is_default": True,
+        },
+    ).json()
+    assert second["is_default"] is True
+
+    listed = c.get("/api/byok-keys", headers=headers).json()
+    assert listed[0]["id"] == second["id"], "default key should be listed first"
+    # And the previously-existing key is no longer default.
+    others = [k for k in listed if k["id"] != second["id"]]
+    assert all(not k["is_default"] for k in others)
+
+
+def test_set_default_demotes_others_for_same_provider(client):
+    main_mod, c = client
+    headers = _bearer(main_mod, "alice", "a@x.com")
+    a = c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={
+            "label": "a", "provider": "groq", "key": "gsk_aaaabbbbcccc1234",
+            "is_default": True,
+        },
+    ).json()
+    b = c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={"label": "b", "provider": "groq", "key": "gsk_ddddeeeeffff5678"},
+    ).json()
+    other = c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={
+            "label": "other-provider",
+            "provider": "openai",
+            "key": "sk-otherproviderkey",
+            "is_default": True,
+        },
+    ).json()
+
+    # Promote `b` to default; `a` must lose its default flag, but `other`
+    # (different provider) must not.
+    promote = c.post(f"/api/byok-keys/{b['id']}/default", headers=headers)
+    assert promote.status_code == 200
+
+    listed = {k["id"]: k for k in c.get("/api/byok-keys", headers=headers).json()}
+    assert listed[a["id"]]["is_default"] is False
+    assert listed[b["id"]]["is_default"] is True
+    assert listed[other["id"]]["is_default"] is True
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Edit (PATCH)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_patch_updates_label_and_model(client):
+    main_mod, c = client
+    headers = _bearer(main_mod, "alice", "a@x.com")
+    body = c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={"label": "old", "provider": "groq", "key": "gsk_anykeyfortesting1234"},
+    ).json()
+    r = c.patch(
+        f"/api/byok-keys/{body['id']}",
+        headers=headers,
+        json={"label": "new-label", "default_model": "llama-3.1-70b"},
+    )
+    assert r.status_code == 200, r.text
+    listed = c.get("/api/byok-keys", headers=headers).json()
+    assert listed[0]["label"] == "new-label"
+    assert listed[0]["default_model"] == "llama-3.1-70b"
+
+
+def test_patch_with_no_fields_rejected(client):
+    main_mod, c = client
+    headers = _bearer(main_mod, "alice", "a@x.com")
+    body = c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={"label": "x", "provider": "groq", "key": "gsk_anykeyfortesting1234"},
+    ).json()
+    r = c.patch(f"/api/byok-keys/{body['id']}", headers=headers, json={})
+    assert r.status_code == 400
+
+
+def test_patch_label_collision_rejected(client):
+    main_mod, c = client
+    headers = _bearer(main_mod, "alice", "a@x.com")
+    a = c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={"label": "alpha", "provider": "groq", "key": "gsk_aaakey1234567890ab"},
+    ).json()
+    c.post(
+        "/api/byok-keys",
+        headers=headers,
+        json={"label": "beta", "provider": "groq", "key": "gsk_bbbkey1234567890cd"},
+    )
+    # Renaming `alpha` -> `beta` should collide.
+    r = c.patch(f"/api/byok-keys/{a['id']}", headers=headers, json={"label": "beta"})
+    assert r.status_code == 409
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Probe (no real network — assertion on input validation only)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_probe_rejects_unknown_provider(client):
+    main_mod, c = client
+    headers = _bearer(main_mod, "alice", "a@x.com")
+    r = c.post(
+        "/api/byok-keys/probe",
+        headers=headers,
+        json={"provider": "nope"},
+    )
+    assert r.status_code == 400
+
+
+def test_probe_requires_base_url_for_self_hosted(client):
+    main_mod, c = client
+    headers = _bearer(main_mod, "alice", "a@x.com")
+    r = c.post(
+        "/api/byok-keys/probe",
+        headers=headers,
+        json={"provider": "custom", "key": "abc"},
+    )
+    assert r.status_code == 400
+
+
+def test_probe_returns_failure_for_unreachable_host(client):
+    """A bogus base URL should return ok=False with a useful message
+    rather than raising — keeps the UI flow predictable."""
+    main_mod, c = client
+    headers = _bearer(main_mod, "alice", "a@x.com")
+    r = c.post(
+        "/api/byok-keys/probe",
+        headers=headers,
+        json={
+            "provider": "custom",
+            "key": "abc",
+            "base_url": "http://127.0.0.1:1/v1",
+        },
+    )
+    # The endpoint always 200s and tells us in the body whether the
+    # probe succeeded; that way the frontend doesn't need separate
+    # error handling for "couldn't reach" vs "bad credentials".
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "127.0.0.1" in body["message"] or body["status"] != 200

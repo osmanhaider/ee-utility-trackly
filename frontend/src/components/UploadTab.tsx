@@ -99,7 +99,13 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
       .then(res => {
         const keys = res.data ?? [];
         setByokKeys(keys);
-        setByokKeyId(prev => keys.find(k => k.id === prev)?.id ?? keys[0]?.id ?? "");
+        // Pick order: keep the user's current selection if still around,
+        // otherwise the global default key (any provider), otherwise the
+        // first listed key. The backend already orders defaults first.
+        setByokKeyId(prev => {
+          if (keys.find(k => k.id === prev)) return prev;
+          return keys.find(k => k.is_default)?.id ?? keys[0]?.id ?? "";
+        });
       })
       .catch(() => {
         // BYOK might be disabled on the server — keep the option hidden.
@@ -373,7 +379,7 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
               >
                 {byokKeys.map(k => (
                   <option key={k.id} value={k.id}>
-                    {k.label} · {k.provider}
+                    {k.is_default ? "★ " : ""}{k.label} · {k.provider}
                     {k.default_model ? ` · ${k.default_model}` : ""}
                   </option>
                 ))}
