@@ -376,7 +376,12 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
     }
   }
 
-  if (loading) return (
+  // Full-page spinner only on the *initial* load when we have nothing
+  // to show. Background refetches (after a delete / privacy toggle /
+  // upload) keep the existing dashboard visible and surface a small
+  // "Refreshing…" badge below — far less jarring than blanking the
+  // whole page on every mutation.
+  if (loading && !data) return (
     <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: 200, gap: 12, color: "var(--text-2)" }}>
       <Loader2 size={24} style={{ animation: "spin 1s linear infinite" }} /> Loading analytics…
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
@@ -389,6 +394,10 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
       <p>No data yet. Upload some bills to see analytics!</p>
     </div>
   );
+
+  // Background refetch in flight — old data stays visible; a small
+  // pill in the header tells the user fresh numbers are on the way.
+  const refreshing = loading;
 
   const totalSpend = data.totals.total_eur;
   const latestMonth = data.monthly_total[data.monthly_total.length - 1];
@@ -610,7 +619,24 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
     <div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24, flexWrap: "wrap", gap: 8 }}>
         <div>
-          <h2 style={{ color: "var(--text-1)", margin: 0, fontSize: 22 }}>Analytics Dashboard</h2>
+          <h2 style={{ color: "var(--text-1)", margin: 0, fontSize: 22, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            Analytics Dashboard
+            {refreshing && (
+              <span
+                aria-live="polite"
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 6,
+                  background: "var(--accent-soft)", color: "var(--accent)",
+                  border: "1px solid var(--accent)",
+                  padding: "2px 10px", borderRadius: 999,
+                  fontSize: 11, fontWeight: 600,
+                }}
+              >
+                <Loader2 size={11} style={{ animation: "spin 1s linear infinite" }} />
+                Refreshing
+              </span>
+            )}
+          </h2>
           <p style={{ color: "var(--text-2)", margin: "4px 0 0", fontSize: 13 }}>
             {data.totals.bill_count} bills · {types.length} utility types
           </p>
