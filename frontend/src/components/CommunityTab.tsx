@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Users as UsersIcon, Globe, Loader2, AlertCircle } from "lucide-react";
+import { Users as UsersIcon, Loader2, AlertCircle } from "lucide-react";
 import { api, type Bill, type CommunityUser } from "../api";
 import AnalyticsTab from "./AnalyticsTab";
 import { useIsMobile } from "../hooks/useIsMobile";
@@ -31,19 +31,33 @@ export default function CommunityTab({ reloadKey }: CommunityTabProps = {}) {
   useEffect(() => {
     let cancelled = false;
     api.listCommunityUsers()
-      .then((r) => { if (!cancelled) setUsers(r.data); })
+      .then((r) => {
+        if (cancelled) return;
+        setUsers(r.data);
+        // Default to the first user (sorted by bill_count DESC server-side
+        // so the most-active person leads). The aggregate "All users" view
+        // is intentionally not exposed any more — analytics + bills are
+        // always scoped to a single user.
+        setSelectedUserId((prev) => prev ?? r.data[0]?.id ?? null);
+      })
       .catch(() => { if (!cancelled) setError("Couldn't load community users."); })
       .finally(() => { if (!cancelled) setLoadingUsers(false); });
     return () => { cancelled = true; };
   }, [reloadKey]);
 
   useEffect(() => {
+    // Skip the fetch entirely when no user is picked — the JSX renders
+    // a "Pick a member above" empty state purely from selectedUserId,
+    // so any stale bills array from a previous selection is harmless
+    // (it's never read in that branch). Means we can also avoid a
+    // setState-in-effect for the clear case.
+    if (!selectedUserId) return;
     let cancelled = false;
     // Showing the loader on user-picker changes is the whole point of this
     // effect — disabling the rule here is intentional, not an oversight.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoadingBills(true);
-    api.listCommunityBills(selectedUserId ?? undefined)
+    api.listCommunityBills(selectedUserId)
       .then((r) => { if (!cancelled) setBills(r.data); })
       .catch(() => { if (!cancelled) setError("Couldn't load community bills."); })
       .finally(() => { if (!cancelled) setLoadingBills(false); });
@@ -73,20 +87,13 @@ export default function CommunityTab({ reloadKey }: CommunityTabProps = {}) {
       <div style={{ marginBottom: 16 }}>
         <h2 style={{ color: "var(--text-1)", margin: 0, fontSize: 22, letterSpacing: -0.2 }}>Community</h2>
         <p style={{ color: "var(--text-2)", margin: "4px 0 0", fontSize: 13 }}>
-          Insights from every signed-in user. Pick a person or browse all of them at once.
+          Insights from individual signed-in users. Pick a person to see their dashboard.
           Anything anyone marks private stays out of view here.
         </p>
       </div>
 
       <div style={{ ...cardStyle, padding: 12, marginBottom: 16, overflowX: "auto" }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: isMobile ? "nowrap" : "wrap" }}>
-          <UserChip
-            active={selectedUserId === null}
-            onClick={() => setSelectedUserId(null)}
-            icon={<Globe size={14} />}
-            primary="All users"
-            secondary={`${users.reduce((n, u) => n + u.bill_count, 0)} bills`}
-          />
           {users.map((u) => (
             <UserChip
               key={u.id}
@@ -103,6 +110,11 @@ export default function CommunityTab({ reloadKey }: CommunityTabProps = {}) {
               Loading users…
             </span>
           )}
+          {!loadingUsers && users.length === 0 && (
+            <span style={{ color: "var(--text-2)", fontSize: 12, padding: "0 8px" }}>
+              No community users yet.
+            </span>
+          )}
         </div>
       </div>
 
@@ -113,23 +125,39 @@ export default function CommunityTab({ reloadKey }: CommunityTabProps = {}) {
         </div>
       )}
 
-      <AnalyticsTab
-        source={analyticsSource}
-        reloadKey={(reloadKey ?? 0) * 1000 + (selectedUserId ? 1 : 0)}
-      />
+      {selectedUserId ? (
+        <AnalyticsTab
+          source={analyticsSource}
+          // Each (reloadKey, user) pair gets a unique reloadKey so
+          // AnalyticsTab refetches when either changes. Hashing the userId
+          // (instead of just `1`) avoids cross-user analytics getting
+          // served from the cache when switching between people.
+          reloadKey={(reloadKey ?? 0) * 100000 + hashUserId(selectedUserId)}
+        />
+      ) : !loadingUsers ? (
+        <div style={{ ...cardStyle, padding: 32, textAlign: "center", color: "var(--text-3)" }}>
+          <UsersIcon size={28} style={{ marginBottom: 8 }} />
+          <div>Pick a community member above to see their dashboard.</div>
+        </div>
+      ) : null}
 
       <div style={{ marginTop: 24 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
           <h3 style={{ color: "var(--text-1)", margin: 0, fontSize: 16 }}>
             {selectedUser
               ? <>Public bills from <strong>{selectedUser.name ?? selectedUser.email}</strong></>
-              : "Recent public bills"}
+              : "Public bills"}
           </h3>
           <div style={{ fontSize: 12, color: "var(--text-2)" }}>
             {bills.length} bill{bills.length === 1 ? "" : "s"} · Total: <strong style={{ color: "var(--success)" }}>€{totalEur.toFixed(2)}</strong>
           </div>
         </div>
-        {loadingBills ? (
+        {!selectedUserId ? (
+          <div style={{ ...cardStyle, padding: 32, textAlign: "center", color: "var(--text-3)" }}>
+            <UsersIcon size={28} style={{ marginBottom: 8 }} />
+            <div>Pick a member above to see their public bills.</div>
+          </div>
+        ) : loadingBills ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {Array.from({ length: 4 }).map((_, i) => (
               <div key={i} className="skeleton" style={{ height: 56, borderRadius: 12 }} />
@@ -138,7 +166,7 @@ export default function CommunityTab({ reloadKey }: CommunityTabProps = {}) {
         ) : bills.length === 0 ? (
           <div style={{ ...cardStyle, padding: 32, textAlign: "center", color: "var(--text-3)" }}>
             <UsersIcon size={28} style={{ marginBottom: 8 }} />
-            <div>No public bills here yet.</div>
+            <div>No public bills from this user yet.</div>
           </div>
         ) : (
           <div className="list-stagger" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -187,6 +215,16 @@ export default function CommunityTab({ reloadKey }: CommunityTabProps = {}) {
       </div>
     </div>
   );
+}
+
+/** Tiny djb2 hash so each user gets a stable numeric reloadKey. The
+ *  exact value doesn't matter — only that it changes when the userId
+ *  changes, which forces AnalyticsTab to refetch on user-switch. */
+function hashUserId(id: string): number {
+  let h = 5381;
+  for (let i = 0; i < id.length; i++) h = ((h << 5) + h + id.charCodeAt(i)) | 0;
+  // Keep within a comfortable safe integer range when added to reloadKey.
+  return Math.abs(h) % 100000;
 }
 
 interface UserChipProps {
