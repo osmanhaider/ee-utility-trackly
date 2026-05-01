@@ -30,9 +30,16 @@ function fmtLocal(iso: string | null | undefined): { absolute: string; relative:
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
 
+  // dateStyle / timeStyle can't legally combine with timeZoneName per the
+  // ECMA-402 spec (Safari throws "Invalid option : timeZoneName" if you
+  // try). Use explicit field options instead so the absolute string keeps
+  // its zone abbreviation across all engines.
   const absolute = new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
     timeZoneName: "short",
   }).format(d);
 
