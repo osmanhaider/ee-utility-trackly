@@ -45,6 +45,13 @@ const FEATURES: { icon: React.ElementType; title: string; body: string }[] = [
 const REDIRECT_ERROR_MESSAGES: Record<string, string> = {
   "invalid-token":
     "Google rejected the sign-in token. Try again, or use a different Google account.",
+  // Server-side companion to the iOS redirect flow: Render's free tier
+  // can be cold-starting when Google's POST arrives, in which case its
+  // "Starting service…" page auto-refreshes the URL as a GET and the
+  // backend's GET handler bounces here. The backend should now be warm,
+  // so a second attempt almost always succeeds immediately.
+  "cold-start":
+    "Sign-in didn't complete because the backend was waking up. The server is ready now — please tap sign in again.",
 };
 
 export default function LoginScreen({ onSuccess }: Props) {
@@ -93,6 +100,31 @@ export default function LoginScreen({ onSuccess }: Props) {
     );
     return () => clearInterval(id);
   }, []);
+
+  // iOS-only pre-warm: the redirect-flow sign-in posts directly to the
+  // Render backend, which on the free tier sleeps after 15 min idle.
+  // If the backend is asleep when Google's POST arrives, Render's
+  // "Starting service…" holding page hijacks the response and the
+  // user ends up bounced back with a `cold-start` error (see the GET
+  // handler in `main.py`). Firing a single throwaway GET as soon as
+  // the login screen mounts wakes Render in the background, so by
+  // the time the user has read the page, opened Google's sheet, typed
+  // their password and confirmed 2FA (typically 30s+) the backend is
+  // already up. Failures are silent on purpose — this is best-effort.
+  useEffect(() => {
+    if (!useRedirectFlow || !apiBase) return;
+    const controller = new AbortController();
+    fetch(`${apiBase}/api/auth/status`, {
+      method: "GET",
+      signal: controller.signal,
+      cache: "no-store",
+      credentials: "omit",
+    }).catch(() => {
+      /* offline / cold-start failure — the backend will still be up by the
+         time the user finishes 2FA, and the GET fallback handles the rest */
+    });
+    return () => controller.abort();
+  }, [useRedirectFlow, apiBase]);
 
   useEffect(() => {
     if (!clientId) return;

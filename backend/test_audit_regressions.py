@@ -729,6 +729,50 @@ def test_bill_with_no_amount_eur_still_shows_in_monthly_total(app):
     assert by_year["2026"]["total_eur"] == 42.5
 
 
+def test_get_on_google_redirect_bounces_to_login_with_cold_start_error(
+    app, monkeypatch: pytest.MonkeyPatch
+):
+    """On Render's free tier the backend can be cold-starting when
+    Google's POST arrives — Render serves a "Starting service…" page
+    that auto-refreshes the URL, which re-fires it as a GET and drops
+    the POST body. Without a GET handler, FastAPI returned 405 Method
+    Not Allowed and the user saw a raw error page instead of the app.
+
+    The handler must answer GET with a 303 to the SPA login screen
+    carrying `#error=cold-start` in the fragment, so the frontend can
+    surface a friendly retry message instead."""
+    main_mod, client = app
+    monkeypatch.setenv("FRONTEND_URL", "https://example.vercel.app")
+
+    # TestClient follows redirects by default; disable so we can assert
+    # the 303 + Location header before the (unrelated) follow-up.
+    r = client.get("/api/auth/google-redirect", follow_redirects=False)
+    assert r.status_code == 303, r.text
+    location = r.headers["location"]
+    assert location.startswith("https://example.vercel.app/auth/callback"), location
+    assert "#error=cold-start" in location
+
+
+def test_post_on_google_redirect_still_works_after_get_handler_added(
+    app, monkeypatch: pytest.MonkeyPatch
+):
+    """Sanity: adding the GET handler must not have shadowed the
+    real POST handler that Google calls with the credential."""
+    main_mod, client = app
+    monkeypatch.setenv("FRONTEND_URL", "https://example.vercel.app")
+
+    # Without a valid Google ID token the handler bounces with
+    # `error=invalid-token` — not 405, not 422 — confirming the POST
+    # path is still in place.
+    r = client.post(
+        "/api/auth/google-redirect",
+        data={"credential": "not-a-real-id-token"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303, r.text
+    assert "#error=invalid-token" in r.headers["location"]
+
+
 def test_bill_with_no_amount_and_no_line_items_is_still_excluded(app):
     """The fallback only fires when line items exist and have parseable
     amounts. A bill with neither is still nothing the analytics can

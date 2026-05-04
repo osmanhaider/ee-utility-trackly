@@ -416,6 +416,31 @@ async def auth_google(body: GoogleLoginRequest):
     }
 
 
+@app.get("/api/auth/google-redirect")
+async def auth_google_redirect_get():
+    """Catch GETs to the iOS Google redirect endpoint and bounce home.
+
+    The endpoint is meant to receive a `POST` from Google's Identity
+    Services with the ID-token form body. But on Render's free tier the
+    backend can be cold-starting when Google's POST arrives — Render
+    serves its "Starting service…" holding page with a meta-refresh,
+    and that auto-refresh re-fires the URL as a GET, dropping the POST
+    body entirely. Without this handler the user then sees a raw
+    "405 Method Not Allowed" page where the app should be loading.
+
+    By accepting GETs and redirecting to the SPA login screen with a
+    typed `cold-start` error, the user gets a clear "give it another
+    try" message instead of FastAPI's default error page. Direct
+    navigation to this URL (or stale bookmarks) end up in the same
+    place — also correct.
+    """
+    frontend_url = (os.environ.get("FRONTEND_URL") or "/").rstrip("/")
+    return RedirectResponse(
+        f"{frontend_url}/auth/callback#error=cold-start",
+        status_code=303,
+    )
+
+
 @app.post("/api/auth/google-redirect")
 async def auth_google_redirect(
     credential: str = Form(...),
