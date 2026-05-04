@@ -13,9 +13,9 @@ gracefully for other Estonian utility bills.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
 import re
+from dataclasses import dataclass
 
 import pytesseract
 from PIL import Image

@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 import aiosqlite
 
@@ -95,7 +96,7 @@ class Cursor:
 
 
 class ExecuteOperation:
-    def __init__(self, conn: "BaseConnection", sql: str, params: tuple[Any, ...]):
+    def __init__(self, conn: BaseConnection, sql: str, params: tuple[Any, ...]):
         self.conn = conn
         self.sql = sql
         self.params = params

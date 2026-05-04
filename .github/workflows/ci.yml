@@ -33,6 +33,13 @@ jobs:
         run: ruff check .
 
       - name: Pytest
+        env:
+          # `main.py` raises at import time without AUTH_SECRET, and the
+          # auth helpers expect a Google client id to be configured.
+          # These are throwaway values just to satisfy the import-time
+          # checks in tests — no real auth happens.
+          AUTH_SECRET: ci-testing-secret-not-used-for-real-auth-0123456789abcdef
+          GOOGLE_CLIENT_ID: ci-test-client-id
         run: pytest -v
 
   frontend:

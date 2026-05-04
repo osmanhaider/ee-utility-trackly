@@ -1,5 +1,5 @@
-import base64
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -705,11 +705,24 @@ async def upload_bill(
             ) as c:
                 existing_row = await c.fetchone()
 
-        # 3rd priority: same provider (case-insensitive) + same account number
-        if not existing_row and provider and account_number:
+        # 3rd priority: same provider (case-insensitive) + same account number,
+        # but ONLY as a fallback when the new upload has no period_start to
+        # match on. Otherwise distinct billing periods (Jan vs Feb on the
+        # same account) would be collapsed into one row, silently overwriting
+        # a previous month's bill — see the bug fix that restored this
+        # `elif`-style guard.
+        if (
+            not existing_row
+            and provider
+            and account_number
+            and not period_start
+        ):
             async with db.execute(
                 "SELECT id, filename FROM bills "
-                "WHERE LOWER(TRIM(provider)) = LOWER(TRIM(?)) AND account_number = ? AND user_id = ? "
+                "WHERE LOWER(TRIM(provider)) = LOWER(TRIM(?)) "
+                "AND account_number = ? "
+                "AND period_start IS NULL "
+                "AND user_id = ? "
                 "ORDER BY upload_date DESC LIMIT 1",
                 (provider, account_number, user_id),
             ) as c:
