@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import time
-from typing import Mapping
+from collections.abc import Mapping
 
 import httpx
 

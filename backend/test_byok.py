@@ -52,10 +52,12 @@ def test_encrypt_decrypt_roundtrip(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_decrypt_with_wrong_tag_fails(monkeypatch: pytest.MonkeyPatch):
+    from cryptography.exceptions import InvalidTag
+
     byok = _reload_byok(monkeypatch, _b64_key())
     ct, iv, _tag = byok.encrypt("sk-secret")
     bad_tag = base64.b64encode(b"x" * 16).decode()
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         byok.decrypt(ct, iv, bad_tag)
 
 
