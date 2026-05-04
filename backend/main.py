@@ -1053,9 +1053,13 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
     own user_id with public_only=False (their own private bills count). The
     community endpoint passes a target user_id (or None for "all users") with
     public_only=True."""
-    where_amt, params_amt = _build_bill_filter(
-        user_id_filter, public_only, ["amount_eur IS NOT NULL"]
-    )
+    # Don't filter bills by `amount_eur IS NOT NULL` here: korteriühistu
+    # bills sometimes have a NULL header total but a fully parsed
+    # line-item table, in which case we derive the effective amount as
+    # sum(line items) downstream. The Python aggregator already handles
+    # bills with no usable amount, so the SQL just needs to surface
+    # every candidate bill.
+    where_amt, params_amt = _build_bill_filter(user_id_filter, public_only)
     where_provider, params_provider = _build_bill_filter(
         user_id_filter, public_only, ["amount_eur IS NOT NULL", "provider IS NOT NULL"]
     )
@@ -1089,14 +1093,46 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
         # DB-neutral replacement for SQLite's strftime('%Y-%m', ...). Fetching
         # all candidate bills is already required above for line-item analytics,
         # so computing monthly totals in Python avoids dialect-specific SQL.
+        #
+        # Pre-compute an "effective amount" per bill once and reuse it
+        # everywhere downstream: when `amount_eur` is missing but the
+        # bill has line items with parsed amounts (typical for
+        # korteriühistu bills where the header total didn't parse but
+        # the line-item table did), fall back to sum(line items) so
+        # the bill still shows up in monthly totals, type breakdown,
+        # annual rollup, and KPI cards. Without this, those bills
+        # got attributed into per-category splits but excluded from
+        # the headline total — stacked bars stopped reconciling and
+        # the bill silently vanished from the annual rollup.
+        effective_amount: dict[str, float] = {}
+        for bill in all_bills:
+            bid = bill["id"]
+            amt = bill["amount_eur"]
+            if amt is not None:
+                effective_amount[bid] = float(amt)
+                continue
+            raw = bill["raw_json"]
+            if not raw:
+                continue
+            try:
+                items = (json.loads(raw) or {}).get("line_items") or []
+            except (json.JSONDecodeError, TypeError):
+                continue
+            li_amts = [
+                float(it["amount_eur"]) for it in items
+                if it.get("amount_eur") is not None
+            ]
+            if li_amts:
+                effective_amount[bid] = sum(li_amts)
+
         monthly_totals_by_month: dict[str, float] = {}
         for bill in all_bills:
             date_key = bill["period_start"] or bill["bill_date"] or bill["upload_date"]
-            amount = bill["amount_eur"]
+            amount = effective_amount.get(bill["id"])
             if not date_key or len(date_key) < 7 or amount is None:
                 continue
             month = str(date_key)[:7]
-            monthly_totals_by_month[month] = monthly_totals_by_month.get(month, 0.0) + float(amount)
+            monthly_totals_by_month[month] = monthly_totals_by_month.get(month, 0.0) + amount
         monthly_total = [
             {"month": month, "total_eur": round(total, 2)}
             for month, total in sorted(monthly_totals_by_month.items())
@@ -1125,12 +1161,17 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
         if not date_key or len(date_key) < 7:
             continue
         bid = bill["id"]
+        # Use the effective amount (header value, or sum of line items
+        # when the header didn't parse) so a single bill is treated
+        # consistently across `monthly_total`, `bill_meta`, the
+        # type-breakdown reconciliation, and `annual_rollup`.
+        eff_amount = effective_amount.get(bid)
         bill_meta[bid] = {
             "month": date_key[:7],
             "year": date_key[:4],
             "month_num": date_key[5:7],
             "utility_type": bill["utility_type"] or "other",
-            "amount_eur": bill["amount_eur"],
+            "amount_eur": eff_amount,
             "consumption_kwh": bill["consumption_kwh"],
             "consumption_m3": bill["consumption_m3"],
         }
@@ -1152,7 +1193,7 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
                 cat = classify_line_item(item.get("description_et") or "")
                 bill_cat_totals[(bid, cat)] += float(amt)
                 attributed = True
-            if attributed and bill["amount_eur"] is not None:
+            if attributed and eff_amount is not None:
                 # Reconcile line-item splits to the headline bill amount.
                 # Real korteriühistu invoices include VAT, rounding,
                 # prepaid balances and fees that aren't surfaced as
@@ -1162,13 +1203,13 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
                 attributed_total = sum(
                     v for (b, _), v in bill_cat_totals.items() if b == bid
                 )
-                residual = round(float(bill["amount_eur"]) - attributed_total, 2)
+                residual = round(eff_amount - attributed_total, 2)
                 if abs(residual) > 0.01:
                     bill_cat_totals[(bid, "other")] += residual
-            elif not attributed and bill["amount_eur"] is not None:
-                bill_cat_totals[(bid, "other")] = float(bill["amount_eur"])
-        elif bill["amount_eur"] is not None:
-            bill_cat_totals[(bid, bill_type)] = float(bill["amount_eur"])
+            elif not attributed and eff_amount is not None:
+                bill_cat_totals[(bid, "other")] = eff_amount
+        elif eff_amount is not None:
+            bill_cat_totals[(bid, bill_type)] = eff_amount
 
     # Build type-level aggregation from bill-category totals
     type_amts: dict[str, list[float]] = defaultdict(list)
@@ -1325,20 +1366,35 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
     # the deltas are null so a 6-month gap can't masquerade as "MoM".
     for row in monthly_total:
         prev = month_map.get(_prev_month_key(row["month"]))
-        if prev is None or prev == 0:
+        # The € change is well-defined whenever a prior month exists,
+        # even if the prior total was 0 (e.g. a month with no bills, or
+        # a free month). Only the % is undefined — `(x - 0) / 0` —
+        # so guard the percentage separately. Treating "prev == 0" as
+        # "no comparable month" silently dropped the € column for
+        # legitimate transitions like "€0 → €50".
+        if prev is None:
             row["mom_delta_eur"] = None
             row["mom_delta_pct"] = None
         else:
             row["mom_delta_eur"] = round(row["total_eur"] - prev, 2)
-            row["mom_delta_pct"] = round((row["total_eur"] - prev) / prev * 100, 1)
+            row["mom_delta_pct"] = (
+                round((row["total_eur"] - prev) / prev * 100, 1) if prev else None
+            )
 
-    # YoY against the full monthly total a year earlier.
+    # YoY against the full monthly total a year earlier. Same reasoning
+    # as MoM: € is fine at prev=0, only % is undefined.
     for row in monthly_total:
         y, m = row["month"].split("-")
         prev_year_key = f"{int(y) - 1}-{m}"
         prev = month_map.get(prev_year_key)
-        row["yoy_delta_eur"] = round(row["total_eur"] - prev, 2) if prev else None
-        row["yoy_delta_pct"] = round((row["total_eur"] - prev) / prev * 100, 1) if prev else None
+        if prev is None:
+            row["yoy_delta_eur"] = None
+            row["yoy_delta_pct"] = None
+        else:
+            row["yoy_delta_eur"] = round(row["total_eur"] - prev, 2)
+            row["yoy_delta_pct"] = (
+                round((row["total_eur"] - prev) / prev * 100, 1) if prev else None
+            )
 
     # Line-item level trends — aggregated per (month, item) so duplicate
     # rows (multi-tariff electricity, multiple bills in the same month, etc.)
@@ -1865,6 +1921,103 @@ def _redact_secrets(text: str) -> str:
     return out
 
 
+# ────────────────────────── BYOK probe SSRF + DoS guards ──────────────────────
+#
+# `_do_probe` issues a server-side HTTP request to a user-controlled URL.
+# Without guards, any signed-in user could:
+#   - portscan the platform's private network (Render's internal network,
+#     `169.254.169.254` cloud metadata service, sibling backends);
+#   - drive sustained outbound traffic to any host (DoS surface).
+#
+# We address both:
+#   1. Resolve the hostname locally and refuse private/loopback/link-local
+#      ranges unless `BYOK_ALLOW_PRIVATE_BASE_URL=1` is set (defaults to
+#      blocked when `DATABASE_URL` is configured, i.e. production; allowed
+#      otherwise so localhost Ollama still works in local dev).
+#   2. Rate-limit per user with a small sliding window (10 probes / 60s)
+#      so a buggy or hostile client can't loop on the endpoint.
+#
+# Both are intentionally cheap: in-process state, no external dependency.
+# On a multi-instance deployment the rate limit is per-instance, but the
+# SSRF guard always holds.
+
+_BYOK_PROBE_MAX_PER_WINDOW = int(os.environ.get("BYOK_PROBE_MAX_PER_MIN", "10"))
+_BYOK_PROBE_WINDOW_SEC = 60.0
+_byok_probe_history: dict[str, list[float]] = {}
+
+
+def _allow_private_base_url() -> bool:
+    """Whether to permit BYOK base URLs that resolve to private / loopback
+    addresses. Default: allow in dev (no DATABASE_URL), block in prod."""
+    raw = os.environ.get("BYOK_ALLOW_PRIVATE_BASE_URL")
+    if raw is not None:
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    # No explicit override: production (Postgres) defaults to blocked.
+    return not bool(os.environ.get("DATABASE_URL", "").strip())
+
+
+def _resolve_addrs(host: str) -> list[str]:
+    """Return all IP addresses `host` resolves to, or [] on failure."""
+    import socket
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return []
+    return [info[4][0] for info in infos]
+
+
+def _is_disallowed_target(host: str) -> str | None:
+    """If `host` resolves to a private / loopback / link-local / multicast
+    / cloud-metadata address, return a short reason string. Otherwise None."""
+    import ipaddress
+    addrs = _resolve_addrs(host)
+    if not addrs:
+        # Don't block on resolution failure — let httpx surface the real
+        # network error so the user sees "Couldn't reach …" instead of a
+        # confusing "blocked" response.
+        return None
+    for addr in addrs:
+        try:
+            ip = ipaddress.ip_address(addr.split("%")[0])
+        except ValueError:
+            continue
+        if ip.is_loopback:
+            return "loopback address"
+        if ip.is_private:
+            return "private network address"
+        if ip.is_link_local:
+            return "link-local address"
+        if ip.is_multicast:
+            return "multicast address"
+        if ip.is_reserved:
+            return "reserved address"
+        # AWS / GCP / Azure metadata service.
+        if str(ip) in {"169.254.169.254", "fd00:ec2::254"}:
+            return "cloud metadata address"
+    return None
+
+
+def _check_probe_rate_limit(user_id: str) -> None:
+    """Raise 429 if `user_id` has run more than `_BYOK_PROBE_MAX_PER_WINDOW`
+    probes in the trailing `_BYOK_PROBE_WINDOW_SEC` seconds."""
+    now = time.time()
+    window_start = now - _BYOK_PROBE_WINDOW_SEC
+    history = _byok_probe_history.get(user_id, [])
+    # Drop timestamps that fell off the window so the dict doesn't grow.
+    fresh = [t for t in history if t > window_start]
+    if len(fresh) >= _BYOK_PROBE_MAX_PER_WINDOW:
+        retry_after = max(1, int(fresh[0] + _BYOK_PROBE_WINDOW_SEC - now) + 1)
+        _byok_probe_history[user_id] = fresh
+        raise HTTPException(
+            429,
+            f"Probe rate limit exceeded ({_BYOK_PROBE_MAX_PER_WINDOW}/min). "
+            f"Try again in {retry_after}s.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    fresh.append(now)
+    _byok_probe_history[user_id] = fresh
+
+
 async def _do_probe(provider_id: str, key: str, base_url_override: str | None) -> dict:
     """Shared probe logic — used both for ad-hoc Add-form probes (caller
     provides the plaintext key) and for saved-key probes (caller passes
@@ -1884,6 +2037,21 @@ async def _do_probe(provider_id: str, key: str, base_url_override: str | None) -
         raise HTTPException(400, "Base URL is required for this provider.")
     if not (base.startswith("http://") or base.startswith("https://")):
         raise HTTPException(400, "Base URL must start with http:// or https://.")
+
+    # SSRF guard: refuse to make outbound requests to private / loopback
+    # / metadata addresses unless explicitly allowed (local dev). Without
+    # this, a signed-in user could portscan the Render internal network
+    # or hit `169.254.169.254` instance metadata.
+    if not _allow_private_base_url():
+        from urllib.parse import urlparse
+        host = urlparse(base).hostname or ""
+        reason = _is_disallowed_target(host)
+        if reason:
+            return {
+                "ok": False,
+                "status": 0,
+                "message": f"Refusing to probe {host} ({reason}).",
+            }
 
     headers = {"Accept": "application/json"}
     if key:
@@ -1947,12 +2115,13 @@ async def _do_probe(provider_id: str, key: str, base_url_override: str | None) -
 @app.post("/api/byok-keys/probe")
 async def byok_keys_probe(
     body: ByokProbeRequest,
-    _user_id: str = Depends(get_user_id),
+    user_id: str = Depends(get_user_id),
 ):
     """Fire a one-shot GET /models using a *plaintext* key supplied in
     the request — used by the Add-key form before the user commits to
     saving."""
     _require_byok_configured()
+    _check_probe_rate_limit(user_id)
     return await _do_probe(body.provider, (body.key or "").strip(), body.base_url)
 
 
@@ -1965,6 +2134,7 @@ async def byok_keys_probe_saved(
     it can't reuse the public probe endpoint — that one would have to
     fall back to no-auth and 401 for every real provider. Decrypt
     server-side and reuse the same logic."""
+    _check_probe_rate_limit(user_id)
     row = await _resolve_byok_key(user_id, key_id)
     try:
         plaintext = byok_mod.decrypt(row["encrypted_key"], row["iv"], row["tag"])

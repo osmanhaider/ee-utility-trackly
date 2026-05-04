@@ -464,3 +464,290 @@ def test_line_items_still_skipped_when_amount_eur_is_missing(app):
     trends = r.json().get("line_item_trends", [])
     labels = [row["description_en"] for row in trends]
     assert "Has description but no amount" not in labels
+
+
+# ───────── Fix #9: MoM/YoY € is well-defined when previous month is €0 ────────
+
+def _seed_bare_bill(
+    main_mod, *, owner: str, bill_id: str, period_start: str, amount_eur: float,
+    utility_type: str = "electricity",
+) -> None:
+    async def _insert():
+        async with main_mod._db() as db:
+            await db.execute(
+                "INSERT INTO bills (id, filename, upload_date, period_start, "
+                "provider, utility_type, amount_eur, user_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (bill_id, "x.pdf", "2026-04-01T00:00:00", period_start,
+                 "Eesti Energia", utility_type, amount_eur, owner),
+            )
+            await db.commit()
+    asyncio.run(_insert())
+
+
+def test_mom_eur_delta_filled_when_previous_month_was_zero(app):
+    """`mom_delta_eur` is well-defined whenever the previous month exists
+    in the series, even if its total was 0 (e.g. user uploaded a bill
+    after a free month). The € column should not be silently dropped —
+    the README's MoM table promises € + % per month."""
+    main_mod, client = app
+    # February has a real bill; January is in the series with a €0 total
+    # via a free promotional month (amount_eur explicitly 0).
+    _seed_bare_bill(
+        main_mod, owner="alice-sub", bill_id="b0",
+        period_start="2026-01-15", amount_eur=0.0,
+    )
+    _seed_bare_bill(
+        main_mod, owner="alice-sub", bill_id="b1",
+        period_start="2026-02-15", amount_eur=50.0,
+    )
+
+    r = client.get("/api/analytics/summary", headers=_bearer(main_mod))
+    assert r.status_code == 200
+    by_month = {row["month"]: row for row in r.json()["monthly_total"]}
+    assert by_month["2026-02"]["mom_delta_eur"] == 50.0, (
+        "€ delta should be current - prev = 50 - 0 = 50, not None"
+    )
+    # The percentage is mathematically undefined at prev=0, so it stays None.
+    assert by_month["2026-02"]["mom_delta_pct"] is None
+
+
+def test_mom_eur_delta_remains_null_when_no_previous_month(app):
+    """First month in the series has no comparable previous month — both
+    € and % must stay None for that row."""
+    main_mod, client = app
+    _seed_bare_bill(
+        main_mod, owner="alice-sub", bill_id="b1",
+        period_start="2026-02-15", amount_eur=50.0,
+    )
+
+    r = client.get("/api/analytics/summary", headers=_bearer(main_mod))
+    by_month = {row["month"]: row for row in r.json()["monthly_total"]}
+    assert by_month["2026-02"]["mom_delta_eur"] is None
+    assert by_month["2026-02"]["mom_delta_pct"] is None
+
+
+# ─── Fix #10: BYOK probe SSRF + DoS protection ───
+
+def test_probe_rejects_loopback_in_production(
+    app, monkeypatch: pytest.MonkeyPatch
+):
+    """In production (DATABASE_URL set, BYOK_ALLOW_PRIVATE_BASE_URL not
+    set) the probe should refuse to connect to localhost — without
+    this, any signed-in user could hit the platform's internal network
+    or cloud metadata service via SSRF."""
+    main_mod, client = app
+    headers = _bearer(main_mod)
+
+    # Simulate a production-like environment by forcing the SSRF guard on.
+    monkeypatch.setenv("BYOK_ALLOW_PRIVATE_BASE_URL", "0")
+
+    r = client.post(
+        "/api/byok-keys/probe",
+        json={
+            "provider": "ollama",
+            "key": "",
+            "base_url": "http://127.0.0.1:11434/v1",
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "Refusing to probe" in body["message"]
+    assert "loopback" in body["message"]
+
+
+def test_probe_rejects_aws_metadata_address(
+    app, monkeypatch: pytest.MonkeyPatch
+):
+    """169.254.169.254 (and the IPv6 GCE/Azure equivalents) must be
+    blocked specifically — link-local would already catch it, but the
+    explicit message helps operators spot abuse attempts in logs."""
+    main_mod, client = app
+    headers = _bearer(main_mod)
+    monkeypatch.setenv("BYOK_ALLOW_PRIVATE_BASE_URL", "0")
+
+    r = client.post(
+        "/api/byok-keys/probe",
+        json={
+            "provider": "openai",
+            "key": "sk-x",
+            "base_url": "http://169.254.169.254/latest/meta-data/",
+        },
+        headers=headers,
+    )
+    body = r.json()
+    assert body["ok"] is False
+    assert "Refusing to probe" in body["message"]
+
+
+def test_probe_allows_private_address_when_explicitly_enabled(
+    app, monkeypatch: pytest.MonkeyPatch
+):
+    """Local dev / self-hosted Ollama — operator opts in by setting
+    `BYOK_ALLOW_PRIVATE_BASE_URL=1`. We can't actually reach Ollama in
+    this test, but we can verify the SSRF guard didn't fire (the
+    response message should be a network error, not the refusal)."""
+    main_mod, client = app
+    headers = _bearer(main_mod)
+    monkeypatch.setenv("BYOK_ALLOW_PRIVATE_BASE_URL", "1")
+
+    class _FakeClient:
+        def __init__(self, *_a, **_kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *exc): return False
+        async def get(self, *_a, **_kw):
+            import httpx as _h
+            raise _h.ConnectError("refused")
+
+    monkeypatch.setattr(main_mod.httpx, "AsyncClient", _FakeClient)
+
+    r = client.post(
+        "/api/byok-keys/probe",
+        json={
+            "provider": "ollama", "key": "",
+            "base_url": "http://127.0.0.1:11434/v1",
+        },
+        headers=headers,
+    )
+    body = r.json()
+    assert body["ok"] is False
+    assert "Refusing to probe" not in body["message"]
+    assert "Couldn't reach" in body["message"]
+
+
+def test_probe_rate_limit_returns_429_after_threshold(
+    app, monkeypatch: pytest.MonkeyPatch
+):
+    """No-cap probe is a DoS surface (and an SSRF-amplification one).
+    Drop the per-user limit to 3/window for the test, then verify the
+    4th call comes back as 429 with a `Retry-After` header."""
+    main_mod, client = app
+    headers = _bearer(main_mod)
+
+    monkeypatch.setattr(main_mod, "_BYOK_PROBE_MAX_PER_WINDOW", 3)
+    main_mod._byok_probe_history.clear()
+
+    # Stub httpx so the probe doesn't actually try to call out.
+    class _OkClient:
+        def __init__(self, *_a, **_kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *exc): return False
+        async def get(self, *_a, **_kw):
+            class _R:
+                status_code = 200
+                text = '{"data": []}'
+                def json(self): return {"data": []}
+            return _R()
+
+    monkeypatch.setattr(main_mod.httpx, "AsyncClient", _OkClient)
+    monkeypatch.setenv("BYOK_ALLOW_PRIVATE_BASE_URL", "1")
+
+    payload = {"provider": "openai", "key": "sk-x",
+               "base_url": "https://api.example.com/v1"}
+
+    for i in range(3):
+        r = client.post("/api/byok-keys/probe", json=payload, headers=headers)
+        assert r.status_code == 200, f"call {i + 1} should succeed"
+    r = client.post("/api/byok-keys/probe", json=payload, headers=headers)
+    assert r.status_code == 429, r.text
+    assert "Retry-After" in r.headers
+
+
+def test_probe_rate_limit_is_per_user(app, monkeypatch: pytest.MonkeyPatch):
+    """One user's rapid-fire probes must not block another user."""
+    main_mod, client = app
+    monkeypatch.setattr(main_mod, "_BYOK_PROBE_MAX_PER_WINDOW", 2)
+    main_mod._byok_probe_history.clear()
+
+    class _OkClient:
+        def __init__(self, *_a, **_kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *exc): return False
+        async def get(self, *_a, **_kw):
+            class _R:
+                status_code = 200
+                text = '{"data": []}'
+                def json(self): return {"data": []}
+            return _R()
+    monkeypatch.setattr(main_mod.httpx, "AsyncClient", _OkClient)
+    monkeypatch.setenv("BYOK_ALLOW_PRIVATE_BASE_URL", "1")
+
+    payload = {"provider": "openai", "key": "sk-x",
+               "base_url": "https://api.example.com/v1"}
+
+    alice = _bearer(main_mod, "alice-sub", "alice@x")
+    bob = _bearer(main_mod, "bob-sub", "bob@x")
+
+    assert client.post("/api/byok-keys/probe", json=payload, headers=alice).status_code == 200
+    assert client.post("/api/byok-keys/probe", json=payload, headers=alice).status_code == 200
+    # Alice is now over the limit.
+    assert client.post("/api/byok-keys/probe", json=payload, headers=alice).status_code == 429
+    # Bob is unaffected.
+    assert client.post("/api/byok-keys/probe", json=payload, headers=bob).status_code == 200
+
+
+# ─── Fix #12: type-breakdown reconciles when amount_eur is missing ───
+
+def test_bill_with_no_amount_eur_still_shows_in_monthly_total(app):
+    """A korteriühistu bill where the header total didn't parse but
+    the line-item table did used to silently vanish from monthly total
+    + annual rollup, even though it appeared in the type-breakdown
+    splits. Now we derive the headline as sum(line items)."""
+    main_mod, client = app
+
+    async def _insert():
+        raw_json = json.dumps({"line_items": [
+            {"description_et": "Elekter päevane", "description_en": "Electricity (daytime)",
+             "amount_eur": 30.0, "quantity": 65.0, "unit": "kwh"},
+            {"description_et": "Külm vesi", "description_en": "Cold water",
+             "amount_eur": 12.5, "quantity": 2.7, "unit": "m3"},
+        ]})
+        async with main_mod._db() as db:
+            await db.execute(
+                "INSERT INTO bills (id, filename, upload_date, period_start, "
+                "provider, utility_type, amount_eur, raw_json, user_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("kp-1", "korteri.pdf", "2026-04-01T00:00:00", "2026-03-15",
+                 "Korteriühistu", "other", None, raw_json, "alice-sub"),
+            )
+            await db.commit()
+    asyncio.run(_insert())
+
+    r = client.get("/api/analytics/summary", headers=_bearer(main_mod))
+    payload = r.json()
+    by_month = {row["month"]: row for row in payload["monthly_total"]}
+    assert "2026-03" in by_month, (
+        "Bill with missing amount_eur but parseable line items should "
+        "appear in monthly_total via the sum(line items) fallback"
+    )
+    assert by_month["2026-03"]["total_eur"] == 42.5
+    # And it should appear in the annual rollup with bill_count = 1.
+    by_year = {row["year"]: row for row in payload["annual_total"]}
+    assert by_year["2026"]["bill_count"] == 1
+    assert by_year["2026"]["total_eur"] == 42.5
+
+
+def test_bill_with_no_amount_and_no_line_items_is_still_excluded(app):
+    """The fallback only fires when line items exist and have parseable
+    amounts. A bill with neither is still nothing the analytics can
+    say anything useful about — it stays out of the totals."""
+    main_mod, client = app
+
+    async def _insert():
+        async with main_mod._db() as db:
+            await db.execute(
+                "INSERT INTO bills (id, filename, upload_date, period_start, "
+                "provider, utility_type, amount_eur, raw_json, user_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("kp-2", "x.pdf", "2026-04-01T00:00:00", "2026-03-15",
+                 "Mystery", "other", None, None, "alice-sub"),
+            )
+            await db.commit()
+    asyncio.run(_insert())
+
+    r = client.get("/api/analytics/summary", headers=_bearer(main_mod))
+    payload = r.json()
+    assert payload["monthly_total"] == []
+    assert payload["annual_total"] == []

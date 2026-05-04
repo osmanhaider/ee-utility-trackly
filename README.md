@@ -256,6 +256,8 @@ Backend env vars (see `backend/.env.example` for the full list):
 - `DATABASE_URL` — optional locally, required in production for persistent Supabase/Postgres storage. If unset, the backend uses local SQLite at `DB_PATH`.
 - `MAX_UPLOAD_BYTES` — hard cap on upload size in bytes per file (default 25 MB). Multi-file uploads are supported; each file is bounded by this limit.
 - `ANALYTICS_CACHE_TTL_SEC` — in-memory analytics cache TTL (default 60 s). The cache is also wiped on every bill mutation.
+- `BYOK_PROBE_MAX_PER_MIN` — per-user rate limit on BYOK probe endpoints (default 10 / 60 s). The probe issues a server-side outbound request to a user-controlled URL, so this caps the DoS / SSRF-amplification surface.
+- `BYOK_ALLOW_PRIVATE_BASE_URL` — set to `1` / `true` to allow probing private / loopback / link-local addresses (e.g. self-hosted Ollama on `localhost:11434`). Default: blocked when `DATABASE_URL` is set (production) and allowed when not (local dev). Without this guard a signed-in user could portscan the platform's internal network or hit cloud metadata.
 - `DB_PATH`, `UPLOADS_DIR`, `LOG_LEVEL` — override storage paths and log verbosity.
 
 Frontend env vars (see `frontend/.env.example`):
