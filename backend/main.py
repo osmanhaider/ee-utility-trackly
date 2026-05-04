@@ -287,6 +287,12 @@ _AUTH_EXEMPT_PATHS = frozenset({
     "/api/auth/google",
     "/api/auth/google-redirect",
     "/api/auth/status",
+    # The BYOK provider catalogue is documented as a public, static list
+    # (README "Bring your own key (BYOK)" section). It carries no user
+    # data — just the names, default models, key hints and base URLs of
+    # supported OpenAI-compatible providers — so it can be served
+    # without a bearer token, matching the documented contract.
+    "/api/byok-providers",
 })
 
 
@@ -1337,8 +1343,21 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
     # Line-item level trends — aggregated per (month, item) so duplicate
     # rows (multi-tariff electricity, multiple bills in the same month, etc.)
     # combine into a single point with a quantity-weighted unit price.
+    #
+    # The English suffix regex needs to be case-insensitive AND tolerant of
+    # the few real-world variants AI parsers produce — Tesseract +
+    # `translate_term` always emits exactly `[Start: X, End: Y]`, but
+    # Claude / FreeLLMAPI / BYOK can return `[start: …]`,
+    # `(start 9494, end 9559)`, `[Reading: 9494→9559]`, etc. Without
+    # this widening, the same charge from different months stops sharing
+    # one `(month, label)` key and the aggregation falls back to
+    # per-month rows — the cross-month line in section 9 / stacked
+    # bars in section 10 then look broken.
     import re as _re_li
-    _suffix_en = _re_li.compile(r"\s*\[Start:.*?\]\s*$")
+    _suffix_en = _re_li.compile(
+        r"\s*[\[\(]\s*(?:start|reading|meter)\b.*?[\]\)]\s*$",
+        flags=_re_li.IGNORECASE,
+    )
     _suffix_et = _re_li.compile(r"\s+[Aa]lg[:\s].*$")
 
     li_acc: dict[tuple[str, str], dict] = {}
@@ -1358,11 +1377,20 @@ async def _compute_analytics(user_id_filter: str | None, public_only: bool) -> d
             amount = item.get("amount_eur")
             qty = item.get("quantity")
             unit = (item.get("unit") or "").lower()
-            if not en or amount is None:
+            if amount is None:
+                continue
+            # Fall back to the Estonian description when no English one
+            # was returned by the parser. AI parsers occasionally skip
+            # `description_en` (or `enrich_parsed` blanks it when the
+            # glossary doesn't cover the term); without this fallback
+            # those rows would be silently dropped from sections 9–12.
+            if not en:
+                en = et
+            if not en:
                 continue
             # Strip per-bill meter-reading suffixes so the same item
             # aggregates across months.
-            en_key = _suffix_en.sub("", en).strip()
+            en_key = _suffix_en.sub("", en).strip() or en
             et_key = _suffix_et.sub("", et).strip()
             slot = li_acc.setdefault(
                 (month, en_key),
@@ -1568,8 +1596,13 @@ class ByokProbeRequest(BaseModel):
 
 
 @app.get("/api/byok-providers")
-async def byok_providers(_user_id: str = Depends(get_user_id)):
-    """Public catalogue of supported OpenAI-compatible providers."""
+async def byok_providers():
+    """Public catalogue of supported OpenAI-compatible providers.
+
+    Anonymous: this is a static catalogue with no user-specific data, so
+    `_AUTH_EXEMPT_PATHS` lets the bearer-token check skip it. That
+    matches the README, which calls this the only public BYOK endpoint.
+    """
     return {
         "configured": byok_mod.is_configured(),
         "providers": [

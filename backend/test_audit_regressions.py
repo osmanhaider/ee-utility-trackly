@@ -1,4 +1,4 @@
-"""Regression tests for the audit-batch-1 fixes.
+"""Regression tests for the audit-batch fixes.
 
 Each test pins down a specific behaviour the README promises but that the
 production code was getting wrong. Keep this file dense and focused —
@@ -6,7 +6,9 @@ one or two assertions per behaviour, no broad integration tests.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib
+import json
 import os
 import sys
 import tempfile
@@ -275,8 +277,6 @@ def test_partial_unique_index_blocks_two_defaults_at_storage_layer(app):
     we added in init_db() should refuse a second is_default=true row
     for the same (user, provider). Verifying this directly via the DB
     catches future regressions in the SQL flow."""
-    import asyncio
-
     main_mod, _ = app
 
     async def _attempt() -> Exception | None:
@@ -304,3 +304,163 @@ def test_partial_unique_index_blocks_two_defaults_at_storage_layer(app):
         "Partial unique index should have prevented two defaults for the "
         "same (user_id, provider)"
     )
+
+
+# ───── Fix #11: GET /api/byok-providers must be anonymous (matches README) ─────
+
+def test_byok_providers_endpoint_is_anonymous(app):
+    """README calls this the only public BYOK endpoint — it carries
+    only static catalogue data, so it should be reachable without a
+    bearer token."""
+    _, client = app
+    r = client.get("/api/byok-providers")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "providers" in body
+    assert isinstance(body["providers"], list)
+    assert len(body["providers"]) > 0
+    # Sanity: each entry has the documented shape.
+    p = body["providers"][0]
+    for field in ("id", "name", "default_model", "requires_base_url", "allows_empty_key"):
+        assert field in p, f"missing {field} in provider catalogue entry"
+
+
+def test_byok_providers_still_works_with_a_bearer(app):
+    """Anonymous access must not break the authenticated case used by
+    the Settings tab (frontend always sends the token when it has one)."""
+    main_mod, client = app
+    r = client.get("/api/byok-providers", headers=_bearer(main_mod))
+    assert r.status_code == 200
+
+
+# ─── Fix #7: line-item suffix-strip is case-insensitive + variant-tolerant ───
+# ─── Fix #8: line-item rows fall back to description_et when _en is empty ───
+
+
+def _seed_bill_with_line_items(
+    main_mod, *, owner: str, bill_id: str, period_start: str, line_items: list[dict],
+) -> None:
+    """Insert a bill with a hand-rolled raw_json so line-item analytics
+    can be exercised without the parser. Each test scripts the items it
+    wants the analytics aggregator to see."""
+    async def _insert():
+        raw = json.dumps({"line_items": line_items})
+        async with main_mod._db() as db:
+            await db.execute(
+                "INSERT INTO bills (id, filename, upload_date, period_start, "
+                "provider, utility_type, amount_eur, raw_json, user_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (bill_id, "x.pdf", "2026-04-01T00:00:00", period_start,
+                 "Eesti Energia", "electricity",
+                 sum(i.get("amount_eur") or 0 for i in line_items),
+                 raw, owner),
+            )
+            await db.commit()
+    asyncio.run(_insert())
+
+
+def test_line_items_with_lowercase_suffix_aggregate_across_months(app):
+    """AI parsers can return `[start: …]` (lowercase) instead of the
+    `[Start: …]` that translate_term emits. Both should strip cleanly
+    so the same charge from two months merges into one cross-month
+    series in section 9 / stacked bars in section 10."""
+    main_mod, client = app
+    _seed_bill_with_line_items(
+        main_mod, owner="alice-sub", bill_id="b1", period_start="2026-01-15",
+        line_items=[{
+            "description_en": "Electricity (daytime) [start: 9494, end: 9559]",
+            "description_et": "Elekter päevane Alg: 9494 Lõpp: 9559",
+            "amount_eur": 30.0, "quantity": 65.0, "unit": "kwh",
+        }],
+    )
+    _seed_bill_with_line_items(
+        main_mod, owner="alice-sub", bill_id="b2", period_start="2026-02-15",
+        line_items=[{
+            "description_en": "Electricity (daytime) [Start: 9559, End: 9620]",
+            "description_et": "Elekter päevane Alg: 9559 Lõpp: 9620",
+            "amount_eur": 28.0, "quantity": 61.0, "unit": "kwh",
+        }],
+    )
+
+    r = client.get("/api/analytics/summary", headers=_bearer(main_mod))
+    assert r.status_code == 200
+    trends = r.json().get("line_item_trends", [])
+    labels = sorted({row["description_en"] for row in trends})
+    assert labels == ["Electricity (daytime)"], (
+        f"expected single canonical label, got {labels}"
+    )
+    months = sorted(row["month"] for row in trends if row["description_en"] == "Electricity (daytime)")
+    assert months == ["2026-01", "2026-02"], (
+        "Both months should appear under one merged label"
+    )
+
+
+def test_line_items_with_paren_meter_suffix_strip_too(app):
+    """Variant: `(Start 1234, End 5678)` with parentheses also seen
+    from some AI parsers. Should still strip to the bare label."""
+    main_mod, client = app
+    _seed_bill_with_line_items(
+        main_mod, owner="alice-sub", bill_id="b1", period_start="2026-01-15",
+        line_items=[{
+            "description_en": "Cold water (start 443.5, end 446.2)",
+            "description_et": "Külm vesi Alg: 443.5 Lõpp: 446.2",
+            "amount_eur": 10.0, "quantity": 2.7, "unit": "m3",
+        }],
+    )
+    _seed_bill_with_line_items(
+        main_mod, owner="alice-sub", bill_id="b2", period_start="2026-02-15",
+        line_items=[{
+            "description_en": "Cold water [reading: 446.2 → 449.1]",
+            "description_et": "Külm vesi Alg: 446.2 Lõpp: 449.1",
+            "amount_eur": 11.0, "quantity": 2.9, "unit": "m3",
+        }],
+    )
+
+    r = client.get("/api/analytics/summary", headers=_bearer(main_mod))
+    trends = r.json().get("line_item_trends", [])
+    labels = sorted({row["description_en"] for row in trends})
+    assert labels == ["Cold water"], f"expected merged label, got {labels}"
+
+
+def test_line_items_with_only_estonian_description_are_not_dropped(app):
+    """Some AI parser responses leave `description_en` empty when the
+    glossary lookup didn't find a match. Those rows used to be silently
+    dropped from sections 9-12; with the fallback they should now show
+    up using the Estonian description as the label."""
+    main_mod, client = app
+    _seed_bill_with_line_items(
+        main_mod, owner="alice-sub", bill_id="b1", period_start="2026-01-15",
+        line_items=[{
+            "description_en": "",  # AI / parser failure
+            "description_et": "Mingi kohalik tasu",  # not in glossary
+            "amount_eur": 5.0, "quantity": 1.0, "unit": "tk",
+        }],
+    )
+
+    r = client.get("/api/analytics/summary", headers=_bearer(main_mod))
+    trends = r.json().get("line_item_trends", [])
+    labels = [row["description_en"] for row in trends]
+    assert "Mingi kohalik tasu" in labels, (
+        "Estonian-only line items must fall back to description_et so "
+        "they're not silently dropped from line-item analytics"
+    )
+
+
+def test_line_items_still_skipped_when_amount_eur_is_missing(app):
+    """The fallback only covers an empty description — line items with
+    no `amount_eur` are still meaningless for cost analytics and should
+    continue to be skipped."""
+    main_mod, client = app
+    _seed_bill_with_line_items(
+        main_mod, owner="alice-sub", bill_id="b1", period_start="2026-01-15",
+        line_items=[{
+            "description_en": "Has description but no amount",
+            "description_et": "Kirjeldus aga ilma summata",
+            "amount_eur": None,
+        }],
+    )
+
+    r = client.get("/api/analytics/summary", headers=_bearer(main_mod))
+    trends = r.json().get("line_item_trends", [])
+    labels = [row["description_en"] for row in trends]
+    assert "Has description but no amount" not in labels
