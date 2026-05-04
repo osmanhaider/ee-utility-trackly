@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -141,6 +142,15 @@ async def _init_sqlite(db) -> None:
     await db.execute(
         "CREATE INDEX IF NOT EXISTS user_api_keys_user_id_idx ON user_api_keys(user_id)"
     )
+    # Enforce "at most one default per (user_id, provider)" at the storage
+    # layer so two concurrent set-default / create-with-default requests
+    # can't both win the race and leave us with two `is_default = 1`
+    # rows for the same user+provider. SQLite has supported partial
+    # unique indexes since 3.8.0 (2013).
+    await db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS user_api_keys_one_default_per_provider "
+        "ON user_api_keys(user_id, provider) WHERE is_default = 1"
+    )
     async with db.execute("PRAGMA table_info(bills)") as c:
         cols = {row[1] for row in await c.fetchall()}
     if "user_id" not in cols:
@@ -214,6 +224,14 @@ async def _init_postgres(db) -> None:
     )
     await db.execute("CREATE INDEX IF NOT EXISTS bills_user_id_idx ON bills(user_id)")
     await db.execute("CREATE INDEX IF NOT EXISTS user_api_keys_user_id_idx ON user_api_keys(user_id)")
+    # Same partial unique index as on SQLite; without it, two concurrent
+    # POST /api/byok-keys/{id}/default calls under the default
+    # READ COMMITTED isolation can both pass the demote step and both
+    # promote, leaving two defaults for the same (user, provider).
+    await db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS user_api_keys_one_default_per_provider "
+        "ON user_api_keys(user_id, provider) WHERE is_default = true"
+    )
 
 
 async def _upsert_user(db, identity: google_auth_mod.GoogleIdentity) -> None:
@@ -291,6 +309,26 @@ async def no_store_for_api(request: Request, call_next):
     return response
 
 
+def _no_store_response(detail: str, status_code: int) -> JSONResponse:
+    """Build a JSONResponse with the same no-store headers as `no_store_for_api`.
+
+    `auth_middleware` is registered after `no_store_for_api`, which means
+    it sits *outside* — short-circuit responses from here never pass
+    through the inner middleware that adds the cache headers. Without
+    this helper, 401s ship without `Cache-Control`, and iOS Safari /
+    PWA heuristic caching can serve a stale auth-failure body to the
+    next request after the user re-authenticates.
+    """
+    return JSONResponse(
+        {"detail": detail},
+        status_code=status_code,
+        headers={
+            "Cache-Control": "no-store, max-age=0, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     # CORS preflights must pass through untouched — the browser strips
@@ -302,11 +340,11 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
     header = request.headers.get("authorization", "")
     if not header.lower().startswith("bearer "):
-        return JSONResponse({"detail": "Missing bearer token"}, status_code=401)
+        return _no_store_response("Missing bearer token", 401)
     try:
         payload = auth_mod.verify_token(header[7:].strip())
     except auth_mod.AuthError as e:
-        return JSONResponse({"detail": f"Invalid token: {e}"}, status_code=401)
+        return _no_store_response(f"Invalid token: {e}", 401)
     request.state.user_id = payload["sub"]
     request.state.user_email = payload.get("email")
     request.state.user_name = payload.get("name")
@@ -1616,15 +1654,12 @@ async def byok_keys_create(
     now = datetime.now(timezone.utc).isoformat()
     try:
         async with _db() as db:
-            # When the new key is marked as the default, atomically demote
-            # any existing default for the same (user, provider) so we
-            # don't end up with two defaults.
-            if body.is_default:
-                await db.execute(
-                    "UPDATE user_api_keys SET is_default = ? "
-                    "WHERE user_id = ? AND provider = ?",
-                    (False, user_id, body.provider),
-                )
+            # Insert with is_default=false first; if the user asked for
+            # this key to be the default, promote it via the same atomic
+            # `is_default = (id = ?)` UPDATE used by the set-default
+            # endpoint. That single statement guarantees exactly one
+            # default per (user, provider) even under concurrent writes,
+            # without relying on transaction isolation alone.
             await db.execute(
                 """
                 INSERT INTO user_api_keys
@@ -1634,8 +1669,11 @@ async def byok_keys_create(
                 """,
                 (new_id, user_id, label, body.provider, ct, iv, tag,
                  (body.default_model or "").strip() or None,
-                 base_url or None, bool(body.is_default), now),
+                 base_url or None, False, now),
             )
+            if body.is_default:
+                await _atomic_set_default(db, user_id=user_id,
+                                          provider=body.provider, key_id=new_id)
             await db.commit()
     except db_mod.IntegrityError as e:
         raise HTTPException(409, f"You already have a key with label {label!r}.") from e
@@ -1679,6 +1717,26 @@ async def byok_keys_update(
         new_url = body.base_url.strip()
         if new_url and not (new_url.startswith("http://") or new_url.startswith("https://")):
             raise HTTPException(400, "Base URL must start with http:// or https://.")
+        # Reject patches that would clear a required base URL — Ollama,
+        # Custom and any other `requires_base_url` provider would become
+        # unusable, with the next probe / parse failing because there's
+        # no recoverable URL to fall back to.
+        if not new_url:
+            async with _db() as db:
+                async with db.execute(
+                    "SELECT provider FROM user_api_keys WHERE id = ? AND user_id = ?",
+                    (key_id, user_id),
+                ) as c:
+                    row = await c.fetchone()
+            if not row:
+                raise HTTPException(404, "API key not found.")
+            provider = byok_mod.PROVIDERS.get(row["provider"])
+            if provider is not None and provider.requires_base_url:
+                raise HTTPException(
+                    400,
+                    f"{provider.name} requires a base URL; clear the key and re-add "
+                    "it instead of removing the URL.",
+                )
         sets.append("base_url_override = ?")
         args.append(new_url or None)
 
@@ -1705,14 +1763,36 @@ async def byok_keys_update(
     return {"status": "updated"}
 
 
+async def _atomic_set_default(db, *, user_id: str, provider: str, key_id: str) -> None:
+    """Set `is_default = TRUE` on `key_id` and `FALSE` on every other key
+    for the same (user, provider) — in a SINGLE statement.
+
+    The previous demote-then-promote sequence raced under READ COMMITTED
+    on Postgres: two concurrent calls could each see "no current default"
+    in step 1 and both insert/promote in step 2, leaving two defaults.
+    Collapsing both into one UPDATE makes the operation atomic by
+    construction; the row-level locks taken by the UPDATE serialise
+    the writes for us. The partial unique index added in `init_db()`
+    is the belt to this braces.
+
+    Both SQLite (boolean expressions evaluate to 0/1) and Postgres
+    (BOOLEAN) accept `is_default = (id = ?)`.
+    """
+    await db.execute(
+        "UPDATE user_api_keys SET is_default = (id = ?) "
+        "WHERE user_id = ? AND provider = ?",
+        (key_id, user_id, provider),
+    )
+
+
 @app.post("/api/byok-keys/{key_id}/default")
 async def byok_keys_set_default(
     key_id: str,
     user_id: str = Depends(get_user_id),
 ):
-    """Mark a key as the default for its provider. Atomically demotes any
-    existing default for the same (user, provider) so there's exactly
-    one default per provider per user."""
+    """Mark a key as the default for its provider. Demotes any existing
+    default for the same (user, provider) so there's exactly one
+    default per provider per user."""
     _require_byok_configured()
     async with _db() as db:
         async with db.execute(
@@ -1722,18 +1802,34 @@ async def byok_keys_set_default(
             row = await c.fetchone()
         if not row:
             raise HTTPException(404, "API key not found.")
-        provider = row["provider"]
-        await db.execute(
-            "UPDATE user_api_keys SET is_default = ? "
-            "WHERE user_id = ? AND provider = ?",
-            (False, user_id, provider),
-        )
-        await db.execute(
-            "UPDATE user_api_keys SET is_default = ? WHERE id = ? AND user_id = ?",
-            (True, key_id, user_id),
-        )
+        await _atomic_set_default(db, user_id=user_id,
+                                  provider=row["provider"], key_id=key_id)
         await db.commit()
     return {"status": "default-set"}
+
+
+_SECRET_PATTERNS = [
+    # OpenAI-style `sk-...`, Anthropic `sk-ant-...`, Groq `gsk_...`, etc.
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}", re.IGNORECASE),
+    re.compile(r"\bgsk_[A-Za-z0-9_\-]{16,}", re.IGNORECASE),
+    # Google API keys (`AIza...`).
+    re.compile(r"\bAIza[A-Za-z0-9_\-]{16,}"),
+    # Long opaque tokens that look bearer-ish (32+ chars of base64-ish).
+    re.compile(r"\b[A-Za-z0-9_\-]{32,}\b"),
+]
+
+
+def _redact_secrets(text: str) -> str:
+    """Replace anything that looks like an API key with `[redacted]`.
+
+    Defence-in-depth for places where we surface upstream-provider error
+    text — some gateways echo the request bearer back into their HTML/
+    JSON error bodies, and we don't want that to leak through our API.
+    """
+    out = text
+    for pat in _SECRET_PATTERNS:
+        out = pat.sub("[redacted]", out)
+    return out
 
 
 async def _do_probe(provider_id: str, key: str, base_url_override: str | None) -> dict:
@@ -1783,12 +1879,36 @@ async def _do_probe(provider_id: str, key: str, base_url_override: str | None) -
             msg = f"Connection OK · {models_count} models available."
         return {"ok": True, "status": 200, "message": msg}
 
-    snippet = (r.text or "")[:200].strip()
-    return {
-        "ok": False,
-        "status": r.status_code,
-        "message": f"HTTP {r.status_code}: {snippet}" if snippet else f"HTTP {r.status_code}",
+    # Don't echo the raw upstream body. Some providers reflect parts of
+    # the request (including the bearer token they received) into JSON
+    # / HTML error pages, which would leak the user's plaintext API key
+    # back through this response. Instead, surface a fixed copy mapped
+    # from the HTTP status, plus the redacted JSON `error.message` if
+    # the upstream uses the OpenAI-style error envelope.
+    upstream_msg: str | None = None
+    try:
+        body = r.json()
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict):
+                m = err.get("message")
+                if isinstance(m, str) and m:
+                    upstream_msg = _redact_secrets(m)[:120]
+            elif isinstance(body.get("message"), str):
+                upstream_msg = _redact_secrets(body["message"])[:120]
+    except Exception:
+        pass
+
+    canned = {
+        400: "Bad request — check the model name and base URL.",
+        401: "Authentication failed — the API key was rejected.",
+        403: "Forbidden — the key doesn't have access to this endpoint.",
+        404: "Not found — the base URL doesn't expose /v1/models.",
+        429: "Rate limited — try again in a minute.",
     }
+    headline = canned.get(r.status_code, f"HTTP {r.status_code} from upstream.")
+    message = f"{headline} ({upstream_msg})" if upstream_msg else headline
+    return {"ok": False, "status": r.status_code, "message": message}
 
 
 @app.post("/api/byok-keys/probe")

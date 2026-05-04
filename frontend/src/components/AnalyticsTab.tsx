@@ -515,14 +515,19 @@ export default function AnalyticsTab({ source, reloadKey }: AnalyticsTabProps = 
     if (!prev || !cur || !prev.unit_price || !cur.unit_price || !prev.quantity || !cur.quantity) continue;
     const avgQ = (prev.quantity + cur.quantity) / 2;
     const avgP = (prev.unit_price + cur.unit_price) / 2;
-    const priceEff = parseFloat(((cur.unit_price - prev.unit_price) * avgQ).toFixed(2));
-    const volEff   = parseFloat(((cur.quantity   - prev.quantity)   * avgP).toFixed(2));
+    // Bennet identity: `priceEffect + volEffect == total` must hold
+    // both in the stored data AND after display rounding to 2dp.
+    // Round each effect to cents first, then derive total as their
+    // sum — that way the table's three columns always reconcile to the
+    // user's eye, not just to a hidden full-precision value.
+    const priceEffect = Math.round((cur.unit_price - prev.unit_price) * avgQ * 100) / 100;
+    const volEffect   = Math.round((cur.quantity   - prev.quantity)   * avgP * 100) / 100;
     decompAll.push({
       label,
       month: cur.month,
-      priceEffect: priceEff,
-      volEffect: volEff,
-      total: parseFloat((cur.amount_eur - prev.amount_eur).toFixed(2)),
+      priceEffect,
+      volEffect,
+      total: priceEffect + volEffect,
       xLabel: label,
     });
   }
