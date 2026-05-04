@@ -15,13 +15,22 @@ axios.interceptors.request.use((config) => {
   return config;
 });
 
+// Sign-in endpoints — a 401 from these means "couldn't sign you in",
+// not "your existing session expired". Treating those as session expiry
+// would clear a legitimate token and bounce the user back to the login
+// screen on every wrong-password attempt or revoked-Google-token retry.
+const _AUTH_ENTRY_PATHS = [
+  "/api/auth/google",
+  "/api/auth/google-redirect",
+  "/api/auth/status",
+];
+
 axios.interceptors.response.use(
   (r) => r,
   (err) => {
-    // Don't treat a wrong-password 401 from the login endpoint as a session
-    // expiry — let LoginScreen's own catch block handle it and show the error.
-    const isLoginEndpoint = String(err?.config?.url ?? "").includes("/api/auth/login");
-    if (err?.response?.status === 401 && !isLoginEndpoint) {
+    const url = String(err?.config?.url ?? "");
+    const isAuthEntry = _AUTH_ENTRY_PATHS.some(p => url.includes(p));
+    if (err?.response?.status === 401 && !isAuthEntry) {
       clearToken();
       window.dispatchEvent(new Event("auth:logout"));
     }
