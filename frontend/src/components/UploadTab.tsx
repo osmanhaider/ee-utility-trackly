@@ -31,7 +31,6 @@ interface UploadTabProps {
 }
 
 type ItemStatus = "pending" | "uploading" | "success" | "replaced" | "error" | "low_quality" | "too_large";
-type ParserMode = "tesseract" | "freellmapi" | "byok";
 
 interface QueueItem {
   id: string;
@@ -40,11 +39,6 @@ interface QueueItem {
   errorMsg?: string;
   parsed?: Record<string, unknown>;
 }
-
-const FALLBACK_MODELS = [
-  { id: "auto", label: "Auto (FreeLLMAPI router)" },
-  { id: "__custom__", label: "Custom model ID…" },
-];
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -61,52 +55,23 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
   useEffect(() => {
     onRunningChange?.(running);
   }, [running, onRunningChange]);
-  const [parserMode, setParserMode] = useState<ParserMode>("freellmapi");
-  const [availableModels, setAvailableModels] = useState(FALLBACK_MODELS);
-  const [selectedModel, setSelectedModel] = useState(FALLBACK_MODELS[0].id);
-  const [customModel, setCustomModel] = useState("");
-  const [modelsLoading, setModelsLoading] = useState(true);
+
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
+  // The Upload tab is now BYOK-only. The backend's auto-fallback chain
+  // (round-robin LRU across the user's saved keys, skipping any that
+  // were just rate-limited) decides which key to use, so the UI no
+  // longer offers a per-upload key picker. We still load the key list
+  // so we can warn the user when ALL of their keys are exhausted, and
+  // surface healthy/exhausted counts as ambient context.
   const [byokKeys, setByokKeys] = useState<ByokKey[]>([]);
-  const [byokKeyId, setByokKeyId] = useState<string>("");
-  const [byokModelOverride, setByokModelOverride] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    api.getFreeLlmModels()
-      .then(res => {
-        if (cancelled) return;
-        const live = res.data.models || [];
-        const withCustom = [...live, { id: "__custom__", label: "Custom model ID…" }];
-        setAvailableModels(withCustom);
-        if (live.length > 0) setSelectedModel(live[0].id);
-      })
-      .catch(() => {
-        // Backend unreachable — keep fallback list.
-      })
-      .finally(() => {
-        if (!cancelled) setModelsLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, []);
-
-  /** Refresh saved BYOK keys. Called on mount and whenever the user picks
-   * the BYOK parser mode (so adding/removing keys in Settings is reflected
-   * without remounting the always-mounted UploadTab). */
+  /** Refresh saved BYOK keys. Called on mount and whenever the Upload
+   *  tab becomes active so adding/removing keys in Settings is
+   *  reflected without remounting the always-mounted UploadTab. */
   const reloadByokKeys = useCallback(() => {
     api.listMyByokKeys()
-      .then(res => {
-        const keys = res.data ?? [];
-        setByokKeys(keys);
-        // Pick order: keep the user's current selection if still around,
-        // otherwise the global default key (any provider), otherwise the
-        // first listed key. The backend already orders defaults first.
-        setByokKeyId(prev => {
-          if (keys.find(k => k.id === prev)) return prev;
-          return keys.find(k => k.is_default)?.id ?? keys[0]?.id ?? "";
-        });
-      })
+      .then(res => setByokKeys(res.data ?? []))
       .catch(() => {
         // BYOK might be disabled on the server — keep the option hidden.
       });
@@ -116,10 +81,6 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
     reloadByokKeys();
   }, [reloadByokKeys]);
 
-  useEffect(() => {
-    if (parserMode === "byok") reloadByokKeys();
-  }, [parserMode, reloadByokKeys]);
-
   // Refetch when the Upload tab becomes active, so keys added in Settings
   // appear immediately on the user's next visit (UploadTab stays mounted
   // across tab switches to preserve in-flight queues).
@@ -127,44 +88,29 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
     if (isActive) reloadByokKeys();
   }, [isActive, reloadByokKeys]);
 
+  const healthyKeys = byokKeys.filter(k => !k.is_exhausted);
+  const exhaustedKeys = byokKeys.filter(k => k.is_exhausted);
+  const allKeysExhausted = byokKeys.length > 0 && healthyKeys.length === 0;
+
   const updateItem = useCallback((id: string, patch: Partial<QueueItem>) => {
     setQueue(q => q.map(it => (it.id === id ? { ...it, ...patch } : it)));
   }, []);
 
   const processQueue = useCallback(async (items: QueueItem[]) => {
     setRunning(true);
-    const effectiveModel =
-      parserMode === "freellmapi"
-        ? (selectedModel === "__custom__" ? customModel.trim() : selectedModel)
-        : parserMode === "byok"
-          ? byokModelOverride.trim() || undefined
-          : undefined;
-    const effectiveByokKeyId = parserMode === "byok" ? byokKeyId : undefined;
-
-    // Free-tier providers (Gemini, etc.) cap at ~10 requests/minute. Pace
-    // multi-file batches when going through FreeLLMAPI so we stay under
-    // their per-minute window. Local OCR and BYOK paid keys have no
-    // shared rate-limit concern, so they go back-to-back.
-    const pendingCount = items.filter(it => it.status === "pending").length;
-    const paceMs = parserMode === "freellmapi" && pendingCount > 1 ? 6500 : 0;
 
     let successCount = 0;
     let problemCount = 0;
-    let firstUpload = true;
+    let needsKeyRefresh = false;
     for (const item of items) {
       if (item.status !== "pending") continue;
-      if (!firstUpload && paceMs > 0) {
-        await new Promise(resolve => setTimeout(resolve, paceMs));
-      }
-      firstUpload = false;
       updateItem(item.id, { status: "uploading" });
       try {
-        const res = await api.uploadBill(
-          item.file,
-          parserMode,
-          effectiveModel || undefined,
-          effectiveByokKeyId || undefined,
-        );
+        // Always BYOK with no explicit key id — the backend rotates
+        // through the user's saved keys (LRU among healthy ones,
+        // skipping any that just got rate-limited). The user manages
+        // the key set in Settings; per-upload key picking is gone.
+        const res = await api.uploadBill(item.file, "byok");
         const parsed = res.data.parsed;
         const lowQuality = Boolean(parsed?._low_quality);
         if (lowQuality) {
@@ -185,19 +131,23 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
           if (typeof data.detail === "string") {
             msg = data.detail;
           } else if (data.detail && typeof data.detail === "object") {
-            const d = data.detail as { message?: string };
+            const d = data.detail as { message?: string; all_keys_exhausted?: boolean };
             if (typeof d.message === "string") msg = d.message;
+            if (d.all_keys_exhausted) needsKeyRefresh = true;
           }
         }
         updateItem(item.id, { status: "error", errorMsg: msg });
       }
     }
     setRunning(false);
+    // Refresh the keys list so the badge state reflects whatever the
+    // backend just marked exhausted.
+    if (needsKeyRefresh || problemCount > 0) reloadByokKeys();
     // Auto-navigate only if everything went smoothly (no errors, no low quality).
     if (successCount > 0 && problemCount === 0) {
       setTimeout(onSuccess, 2000);
     }
-  }, [parserMode, selectedModel, customModel, byokKeyId, byokModelOverride, updateItem, onSuccess]);
+  }, [updateItem, onSuccess, reloadByokKeys]);
 
   const addFiles = useCallback((files: File[]) => {
     if (files.length === 0) return;
@@ -253,16 +203,6 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
     padding: 24,
   };
 
-  const inputStyle: React.CSSProperties = {
-    width: "100%",
-    background: "var(--surface-2)",
-    border: "1px solid var(--border)",
-    borderRadius: 8,
-    color: "var(--text-1)",
-    padding: "8px 11px",
-    fontSize: 13,
-  };
-
   const allDone = queue.length > 0 && queue.every(it => it.status !== "pending" && it.status !== "uploading");
   const singleSuccess = queue.length === 1 && (queue[0].status === "success" || queue[0].status === "replaced" || queue[0].status === "low_quality");
   const detailItem = singleSuccess ? queue[0] : null;
@@ -278,131 +218,42 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
         Drop one or more files (up to {MAX_FILE_MB} MB each) to extract data.
       </p>
 
-      {/* Parser selector */}
-      <div style={{ ...cardStyle, marginBottom: 16, padding: 16 }}>
-        <div style={{ fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10, fontWeight: 600 }}>
-          Extraction method
-        </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: byokKeys.length > 0
-              ? "repeat(auto-fit, minmax(150px, 1fr))"
-              : "repeat(auto-fit, minmax(180px, 1fr))",
-            gap: 8,
-            marginBottom: parserMode === "freellmapi" || parserMode === "byok" ? 12 : 0,
-          }}
-        >
-          {([
-            { id: "freellmapi", label: "🤖 FreeLLMAPI", desc: "Routed free LLM extraction" },
-            ...(byokKeys.length > 0
-              ? [{ id: "byok" as ParserMode, label: "🔑 My API key", desc: "Use one of your saved provider keys" }]
-              : []),
-            { id: "tesseract" as ParserMode, label: "🔍 Local OCR", desc: "Offline, no API key — Estonian utility bills" },
-          ] as { id: ParserMode; label: string; desc: string }[]).map(({ id, label, desc }) => (
-            <button
-              key={id}
-              onClick={() => setParserMode(id)}
-              disabled={running}
-              className="btn-press"
-              style={{
-                background: parserMode === id ? "var(--accent-soft)" : "var(--surface-2)",
-                border: `1.5px solid ${parserMode === id ? "var(--accent)" : "var(--border)"}`,
-                borderRadius: 10,
-                padding: "10px 12px",
-                cursor: running ? "not-allowed" : "pointer",
-                textAlign: "left",
-                opacity: running ? 0.6 : 1,
-              }}
-            >
-              <div style={{ color: parserMode === id ? "var(--accent)" : "var(--text-1)", fontSize: 13, fontWeight: 600 }}>{label}</div>
-              <div style={{ color: "var(--text-3)", fontSize: 11, marginTop: 2 }}>{desc}</div>
-            </button>
-          ))}
-        </div>
-
-        {parserMode === "freellmapi" && (
-          <div className="fade-in">
-            <label style={{ fontSize: 12, color: "var(--text-2)", display: "block", marginBottom: 4 }}>
-              Model {modelsLoading ? "(loading live list…)" : `(${availableModels.length - 1} available)`}
-            </label>
-            <select
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-              disabled={modelsLoading || running}
-              style={{
-                ...inputStyle,
-                cursor: modelsLoading || running ? "not-allowed" : "pointer",
-                opacity: modelsLoading || running ? 0.6 : 1,
-              }}
-            >
-              {availableModels.map(m => (
-                <option key={m.id} value={m.id}>{m.label}</option>
-              ))}
-            </select>
-            {selectedModel === "__custom__" && (
-              <input
-                type="text"
-                value={customModel}
-                onChange={(e) => setCustomModel(e.target.value)}
-                placeholder="e.g. gemini-2.5-flash"
-                disabled={running}
-                style={{
-                  ...inputStyle,
-                  marginTop: 6,
-                  fontFamily: "monospace",
-                }}
-              />
-            )}
-            <div style={{ fontSize: 11, color: "var(--text-3)", marginTop: 6 }}>
-              Manage provider keys and fallback order in the FreeLLMAPI dashboard at{" "}
-              <a href="http://localhost:3001" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
-                localhost:3001
-              </a>
+      {/* Auto-routing status: replaces the old parser-mode picker.
+          Bills always go through the user's saved BYOK keys; the
+          backend chooses which one round-robin and falls over to the
+          next when one's rate-limited. */}
+      <div style={{ ...cardStyle, marginBottom: 16, padding: 14 }}>
+        {allKeysExhausted ? (
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+            <AlertCircle size={18} style={{ color: "var(--danger)", flexShrink: 0, marginTop: 2 }} />
+            <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+              <div style={{ color: "var(--danger)", fontWeight: 600, marginBottom: 2 }}>
+                All saved API keys are currently rate-limited
+              </div>
+              <div style={{ color: "var(--text-2)" }}>
+                Wait a few minutes and try again, or add another provider in{" "}
+                <strong style={{ color: "var(--text-1)" }}>Settings</strong>.
+                Adding more keys lets the auto-fallback chain stay healthy.
+              </div>
             </div>
           </div>
-        )}
-
-        {parserMode === "byok" && (
-          <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <label style={{ fontSize: 12, color: "var(--text-2)" }}>
-              Saved key
-              <select
-                value={byokKeyId}
-                onChange={(e) => setByokKeyId(e.target.value)}
-                disabled={running || byokKeys.length === 0}
-                style={{
-                  ...inputStyle,
-                  marginTop: 4,
-                  cursor: running ? "not-allowed" : "pointer",
-                }}
-              >
-                {byokKeys.map(k => (
-                  <option key={k.id} value={k.id}>
-                    {k.is_default ? "★ " : ""}{k.label} · {k.provider}
-                    {k.default_model ? ` · ${k.default_model}` : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label style={{ fontSize: 12, color: "var(--text-2)" }}>
-              Model override <span style={{ color: "var(--text-3)" }}>(leave blank to use the key's default)</span>
-              <input
-                type="text"
-                value={byokModelOverride}
-                onChange={(e) => setByokModelOverride(e.target.value)}
-                placeholder={byokKeys.find(k => k.id === byokKeyId)?.default_model ?? ""}
-                disabled={running}
-                style={{
-                  ...inputStyle,
-                  marginTop: 4,
-                  fontFamily: "ui-monospace, SFMono-Regular, monospace",
-                }}
-              />
-            </label>
-            <div style={{ fontSize: 11, color: "var(--text-3)" }}>
-              Add or remove keys in the <strong style={{ color: "var(--text-1)" }}>Settings</strong> tab.
-              Bills uploaded with your key are billed to your provider account.
+        ) : (
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+            <Upload size={16} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 3 }} />
+            <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+              <div style={{ color: "var(--text-1)", fontWeight: 600, marginBottom: 2 }}>
+                Auto-routing across {byokKeys.length} saved key{byokKeys.length === 1 ? "" : "s"}
+                {exhaustedKeys.length > 0 && (
+                  <span style={{ color: "var(--text-3)", fontWeight: 400 }}>
+                    {" "}· {healthyKeys.length} healthy, {exhaustedKeys.length} rate-limited
+                  </span>
+                )}
+              </div>
+              <div style={{ color: "var(--text-3)", fontSize: 12 }}>
+                Manage keys in <strong style={{ color: "var(--text-1)" }}>Settings</strong>.
+                Each upload picks the least-recently-used healthy key, so adding more keys
+                spreads load and gives the chain somewhere to fall over.
+              </div>
             </div>
           </div>
         )}
@@ -498,7 +349,6 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
                 disabled={running}
                 expanded={expandedRow === item.id}
                 onToggle={(id) => setExpandedRow(prev => (prev === id ? null : id))}
-                parserMode={parserMode}
               />
             ))}
           </div>
@@ -536,24 +386,20 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
               </div>
             ) : null}
             <div style={{ color: "var(--text-1)", fontSize: 13, lineHeight: 1.5 }}>
-              {parserMode === "freellmapi" ? (
-                typeof parsed.error === "string" && /rate limit|exhausted/i.test(parsed.error) ? (
-                  <>
-                    Your provider hit its per-minute rate limit. Wait ~60 seconds
-                    and re-upload, or add another provider key to FreeLLMAPI so
-                    the router can fall over automatically.
-                  </>
-                ) : (
-                  <>
-                    Try a different model from the dropdown, or check that FreeLLMAPI
-                    has healthy provider keys configured.
-                  </>
-                )
+              {typeof parsed.error === "string" && /rate limit|exhausted|out of credits/i.test(parsed.error) ? (
+                <>
+                  All saved keys are temporarily rate-limited. Wait a few minutes
+                  and re-upload, or add another provider key in{" "}
+                  <strong style={{ color: "var(--accent)" }}>Settings</strong>{" "}
+                  so the auto-fallback chain has somewhere to go.
+                </>
               ) : (
                 <>
-                  The local OCR parser found very little data. Switch to{" "}
-                  <strong style={{ color: "var(--accent)" }}>AI (FreeLLMAPI)</strong> above and
-                  re-upload so FreeLLMAPI can structure the extracted text.
+                  Try uploading a clearer scan. If the issue is on the provider's
+                  end, check{" "}
+                  <strong style={{ color: "var(--accent)" }}>Settings</strong>{" "}
+                  for a per-key error badge — you may need to top up credits or
+                  rotate the key.
                 </>
               )}
             </div>
@@ -570,10 +416,10 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
           fontSize: 12,
         }}>
           <div style={{ color: "var(--accent)", fontWeight: 600, marginBottom: 4 }}>
-            FreeLLMAPI routed this request via <code>{String(parsed._routed_via)}</code>
+            Routed via <code>{String(parsed._routed_via)}</code>
           </div>
           <div style={{ color: "var(--text-3)" }}>
-            Requested model: <code>{String(parsed._model_used ?? "auto")}</code>
+            Model used: <code>{String(parsed._model_used ?? "auto")}</code>
           </div>
         </div>
       ) : null}
@@ -662,13 +508,14 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
       <div style={{ ...cardStyle, marginTop: 24 }}>
         <h3 style={{ color: "var(--text-1)", margin: "0 0 4px", fontSize: 14 }}>Supported Invoice Types</h3>
         <p style={{ color: "var(--text-3)", fontSize: 12, margin: "0 0 12px" }}>
-          Local OCR works best with standard-layout PDF invoices.
-          AI (FreeLLMAPI) uses local OCR first, then routes text extraction through your free LLM providers.
+          Local text extraction (OCR + native PDF) runs first; the result is then
+          structured by your saved AI provider. Any invoice format works — the
+          parser is provider-driven, not template-driven.
         </p>
 
         <div style={{ marginBottom: 10 }}>
           <div style={{ fontSize: 11, color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6, fontWeight: 600 }}>
-            Utility Bills (best local OCR accuracy)
+            Utility bills (highest extraction accuracy)
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {["Electricity", "Gas", "Water", "Heating", "Internet / Telecom", "Waste Collection", "Housing Association"].map(p => (
@@ -681,7 +528,7 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
 
         <div>
           <div style={{ fontSize: 11, color: "var(--text-2)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>
-            Any invoice (AI / FreeLLMAPI)
+            Any invoice (AI-routed)
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {["Rent", "Subscriptions", "Services", "Repairs", "Insurance", "Any format or language"].map(p => (
@@ -703,10 +550,9 @@ interface QueueRowProps {
   disabled: boolean;
   expanded: boolean;
   onToggle: (id: string) => void;
-  parserMode: ParserMode;
 }
 
-function QueueRow({ item, index, onRemove, disabled, expanded, onToggle, parserMode }: QueueRowProps) {
+function QueueRow({ item, index, onRemove, disabled, expanded, onToggle }: QueueRowProps) {
   const { status, file, errorMsg, parsed } = item;
   const StatusIcon = (() => {
     switch (status) {
@@ -758,13 +604,10 @@ function QueueRow({ item, index, onRemove, disabled, expanded, onToggle, parserM
       return `Trim or compress the PDF below ${MAX_FILE_MB} MB and re-drop it. Most invoices fit easily — usually a scan resolution issue.`;
     }
     if (isRateLimit) {
-      return "Your provider hit its per-minute rate limit. Wait ~60 seconds and re-upload, or add another provider key to FreeLLMAPI so the router can fall over.";
+      return "All saved API keys are temporarily rate-limited. Wait a few minutes and re-upload, or add another provider in Settings so the auto-fallback chain has somewhere to go.";
     }
-    if (status === "low_quality" && parserMode !== "freellmapi") {
-      return "The local OCR parser found very little data. Switch to AI (FreeLLMAPI) above and re-upload so a free LLM can structure the extracted text.";
-    }
-    if (status === "low_quality" && parserMode === "freellmapi") {
-      return "The model returned a response but with too few useful fields. Try a different model from the dropdown, or re-upload with a clearer scan.";
+    if (status === "low_quality") {
+      return "The model returned a response but with too few useful fields. Try a clearer scan, or pick a stronger model on one of your saved keys (Settings → Edit → Default model).";
     }
     return "Try uploading the file again. If this keeps happening, check the browser console for the underlying network error.";
   })();

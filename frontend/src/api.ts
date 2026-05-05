@@ -103,6 +103,21 @@ export interface ByokKey {
   /** True when this key is the per-provider default for the user. */
   is_default: boolean;
   created_at: string;
+  /** ISO timestamp of the most recent successful upload using this key,
+   *  or null if it has never been used. Drives the LRU round-robin
+   *  selection in the auto-fallback chain. */
+  last_used_at: string | null;
+  /** Human-readable reason why the auto-fallback chain marked this key
+   *  exhausted (rate limited / out of credits / auth failed) — null
+   *  when the key is healthy. The Settings tab surfaces this as a
+   *  red badge. */
+  last_error: string | null;
+  /** ISO timestamp of `last_error`. */
+  last_error_at: string | null;
+  /** Server-computed: true when `last_error_at` falls inside the
+   *  cooldown window (1h) so the chain is currently skipping this
+   *  key. Falls back to false once the window elapses. */
+  is_exhausted: boolean;
 }
 
 export interface ByokProbeResult {

@@ -22,6 +22,31 @@ import httpx
 
 logger = logging.getLogger("utility_tracker")
 
+
+class KeyExhaustedError(RuntimeError):
+    """The upstream provider rejected this specific API key in a way that
+    makes other keys worth trying — rate limit (429), credit exhaustion
+    (402), or auth failure (401/403). The upload pipeline catches this
+    explicitly so it can mark the key as temporarily unhealthy and fall
+    over to another key in the user's auto-fallback chain.
+
+    Generic `RuntimeError`s (parsing failures, malformed JSON, network
+    timeouts, etc.) keep their existing semantics — they bubble up and
+    fail the upload, since trying another key won't help.
+
+    `kind` is a stable machine-readable code for analytics / UI badging.
+    `message` (carried via the parent class) is the user-facing string.
+    """
+
+    KIND_RATE_LIMIT = "rate_limit"
+    KIND_OUT_OF_CREDITS = "out_of_credits"
+    KIND_AUTH_FAILED = "auth_failed"
+
+    def __init__(self, message: str, *, kind: str):
+        super().__init__(message)
+        self.kind = kind
+
+
 # Big enough for korteriühistu bills with 15+ line items + EN/ET translations.
 DEFAULT_MAX_TOKENS = int(os.environ.get("FREELLMAPI_MAX_TOKENS", 10000))
 MAX_RETRIES = int(os.environ.get("FREELLMAPI_MAX_RETRIES", 3))
@@ -133,6 +158,31 @@ def _is_rate_limit_response(status_code: int, body: object) -> bool:
     return False
 
 
+def _classify_key_exhaustion(status_code: int, body: object) -> str | None:
+    """Classify an upstream failure that warrants falling over to a
+    different key. Returns one of the `KeyExhaustedError.KIND_*` codes
+    or None if the failure looks key-agnostic (network, malformed
+    response, etc.) and trying another key won't help."""
+    if _is_rate_limit_response(status_code, body):
+        return KeyExhaustedError.KIND_RATE_LIMIT
+    if status_code == 402:
+        return KeyExhaustedError.KIND_OUT_OF_CREDITS
+    if status_code in (401, 403):
+        return KeyExhaustedError.KIND_AUTH_FAILED
+    # `insufficient_quota` is OpenAI's typed error for "you're out of
+    # credits"; surface it as out_of_credits even when the HTTP status
+    # itself is non-specific (some gateways return 400 with the typed
+    # body instead of 402).
+    if isinstance(body, dict):
+        err = body.get("error") if isinstance(body.get("error"), dict) else {}
+        err_code = (err.get("code") or err.get("type") or "").lower()
+        if err_code in {"insufficient_quota", "credit_exhausted", "billing_hard_limit_reached"}:
+            return KeyExhaustedError.KIND_OUT_OF_CREDITS
+        if err_code in {"invalid_api_key", "incorrect_api_key", "authentication_error"}:
+            return KeyExhaustedError.KIND_AUTH_FAILED
+    return None
+
+
 def _is_transient_status(status_code: int) -> bool:
     return status_code == 408 or status_code == 425 or 500 <= status_code <= 599
 
@@ -228,8 +278,25 @@ def call_openai_compat_chat(
 
     assert response is not None  # the loop runs at least once
     if not response.is_success:
-        if _is_rate_limit_response(response.status_code, last_detail):
-            raise RuntimeError(_friendly_rate_limit_error(last_detail, source_name))
+        kind = _classify_key_exhaustion(response.status_code, last_detail)
+        if kind is not None:
+            # Upgrade to KeyExhaustedError so the caller's auto-fallback
+            # chain can mark this key as exhausted and try another one.
+            # Generic RuntimeErrors (network glitches, malformed bodies)
+            # are NOT key-specific so they keep failing the upload.
+            if kind == KeyExhaustedError.KIND_RATE_LIMIT:
+                msg = _friendly_rate_limit_error(last_detail, source_name)
+            elif kind == KeyExhaustedError.KIND_OUT_OF_CREDITS:
+                msg = (
+                    f"{source_name} reports this key is out of credits. "
+                    "Top up the provider account, or add another key."
+                )
+            else:  # KIND_AUTH_FAILED
+                msg = (
+                    f"{source_name} rejected this key as invalid. Double-check "
+                    "it in Settings, or delete and re-add."
+                )
+            raise KeyExhaustedError(msg, kind=kind)
         raise RuntimeError(f"{source_name} request failed: {last_detail}")
 
     body = response.json()

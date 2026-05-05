@@ -7,6 +7,7 @@ import HelpTab from "./components/HelpTab";
 import CommunityTab from "./components/CommunityTab";
 import SettingsTab from "./components/SettingsTab";
 import LoginScreen from "./components/LoginScreen";
+import OnboardingScreen from "./components/OnboardingScreen";
 import ErrorBoundary from "./components/ErrorBoundary";
 import ThemeToggle from "./components/ThemeToggle";
 import {
@@ -20,6 +21,11 @@ import { useTheme } from "./theme";
 
 type Tab = "upload" | "bills" | "analytics" | "community" | "settings" | "help";
 type AuthState = "loading" | "required" | "authed";
+// 'unknown' = haven't checked yet (still loading the keys count); 'none'
+// = freshly-signed-in user with zero saved BYOK keys, blocks the rest of
+// the app behind <OnboardingScreen/>; 'has_keys' = at least one key, app
+// runs normally.
+type OnboardingState = "unknown" | "none" | "has_keys";
 const TABS: Tab[] = ["upload", "bills", "analytics", "community", "settings", "help"];
 
 function tabFromHash(): Tab {
@@ -44,6 +50,10 @@ export default function App() {
   const [authState, setAuthState] = useState<AuthState>(() =>
     getToken() ? "loading" : "required",
   );
+  // Tracks whether the user has at least one BYOK key. Until the keys
+  // request resolves we render the loading splash; if the user has
+  // zero keys we gate the app behind the onboarding screen.
+  const [onboardingState, setOnboardingState] = useState<OnboardingState>("unknown");
   const [me, setMe] = useState<User | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
   const profileBtnRef = useRef<HTMLButtonElement | null>(null);
@@ -95,6 +105,7 @@ export default function App() {
     const onLogout = () => {
       setMe(null);
       setAuthState("required");
+      setOnboardingState("unknown");
     };
     window.addEventListener("auth:logout", onLogout);
     return () => {
@@ -102,6 +113,33 @@ export default function App() {
       window.removeEventListener("auth:logout", onLogout);
     };
   }, []);
+
+  // Once authed, check whether the user has any BYOK keys. Zero keys
+  // means we gate the rest of the app behind <OnboardingScreen/>;
+  // otherwise the normal tab UI mounts. We deliberately fail-open
+  // (treat fetch errors as "has_keys") so a transient network blip
+  // can't lock an existing user out of their data.
+  useEffect(() => {
+    if (authState !== "authed") return;
+    let cancelled = false;
+    api
+      .listMyByokKeys()
+      .then((res) => {
+        if (cancelled) return;
+        const keys = res.data ?? [];
+        setOnboardingState(keys.length === 0 ? "none" : "has_keys");
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        // If BYOK isn't configured at all (503), don't strand the user
+        // on an onboarding screen they can't satisfy — let them through
+        // to the rest of the app, where the Settings tab will surface
+        // the configuration warning instead.
+        setOnboardingState("has_keys");
+        console.warn("Couldn't load BYOK keys:", e);
+      });
+    return () => { cancelled = true; };
+  }, [authState]);
 
   const onLoginSuccess = () => {
     api
@@ -113,11 +151,16 @@ export default function App() {
       .catch(() => setAuthState("required"));
   };
 
+  const onFirstKeyAdded = () => {
+    setOnboardingState("has_keys");
+  };
+
   const logout = () => {
     clearToken();
     setMe(null);
     setProfileOpen(false);
     setAuthState("required");
+    setOnboardingState("unknown");
   };
 
   // Track the trigger button's viewport rect while the menu is open so
@@ -143,7 +186,7 @@ export default function App() {
     };
   }, [profileOpen]);
 
-  if (authState === "loading") {
+  if (authState === "loading" || (authState === "authed" && onboardingState === "unknown")) {
     return (
       <div
         style={{
@@ -162,6 +205,17 @@ export default function App() {
 
   if (authState === "required") {
     return <LoginScreen onSuccess={onLoginSuccess} />;
+  }
+
+  // Authed but no BYOK keys: block the rest of the app until the user
+  // adds their first one. Without this gate, new users land on a
+  // non-functional Upload tab and assume the app is broken.
+  if (onboardingState === "none") {
+    return (
+      <div style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--text-1)" }}>
+        <OnboardingScreen onKeyAdded={onFirstKeyAdded} />
+      </div>
+    );
   }
 
   return (
