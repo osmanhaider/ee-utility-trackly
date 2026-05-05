@@ -273,12 +273,39 @@ export default function SettingsTab() {
           Settings
         </h2>
         <p style={{ color: "var(--text-2)", margin: "4px 0 0", fontSize: 13, lineHeight: 1.55 }}>
-          Optional: bring your own API keys for OpenAI-compatible providers. When configured,
-          you can pick "Use my API key" on the Upload tab and bills are extracted directly
-          via your account — no FreeLLMAPI router involved. Self-hosted endpoints (Ollama,
+          Manage the API keys used to parse uploaded bills. Add multiple keys to
+          enable automatic fall-over: when one provider is rate-limited, the
+          next healthy key in your list is used. Self-hosted endpoints (Ollama,
           custom gateways) are also supported via the Custom provider.
         </p>
       </div>
+
+      {keys.length >= 7 && (
+        <div
+          className="fade-in"
+          style={{
+            ...cardStyle,
+            marginBottom: 16,
+            borderLeft: "3px solid var(--warning)",
+            background: "var(--warning-soft)",
+            display: "flex",
+            gap: 10,
+            alignItems: "flex-start",
+          }}
+        >
+          <AlertCircle size={18} style={{ color: "var(--warning)", flexShrink: 0, marginTop: 1 }} />
+          <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+            <div style={{ color: "var(--warning)", fontWeight: 600, marginBottom: 2 }}>
+              You have {keys.length} saved keys
+            </div>
+            <div style={{ color: "var(--text-2)" }}>
+              That's plenty of fall-over headroom. Consider deleting any that
+              you no longer use to keep the chain focused — extra keys don't
+              hurt accuracy, but they make the list harder to scan.
+            </div>
+          </div>
+        </div>
+      )}
 
       {!configured && (
         <div
@@ -395,6 +422,31 @@ export default function SettingsTab() {
                     {k.is_default && (
                       <span style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", fontSize: 11, fontWeight: 600 }}>
                         <Star size={11} fill="currentColor" /> default
+                      </span>
+                    )}
+                    {/* Red badge when the auto-fallback chain has marked
+                        this key as exhausted (rate limited / out of credits
+                        / auth failed). The badge auto-clears after the
+                        cooldown window (1 hour) on the next list refresh
+                        — or sooner, on the next successful upload via
+                        this key. The full reason is shown on hover. */}
+                    {k.is_exhausted && (
+                      <span
+                        title={k.last_error ?? "rate limited"}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 4,
+                          color: "var(--danger)", fontSize: 11, fontWeight: 600,
+                          padding: "2px 8px", borderRadius: 999,
+                          background: "var(--danger-soft)",
+                          border: "1px solid var(--danger)",
+                        }}
+                      >
+                        <AlertCircle size={11} />
+                        {k.last_error?.startsWith("out_of_credits")
+                          ? "out of credits"
+                          : k.last_error?.startsWith("auth_failed")
+                            ? "key rejected"
+                            : "rate limited"}
                       </span>
                     )}
                     {justAdded === k.id && (

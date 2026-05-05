@@ -29,6 +29,7 @@ testpaths = [
     "test_cross_user_isolation.py",
     "test_upload_dedup.py",
     "test_audit_regressions.py",
+    "test_byok_fallback.py",
     "test_byok.py",
     "test_db_adapter.py",
 ]

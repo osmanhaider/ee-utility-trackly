@@ -22,6 +22,7 @@ import google_auth as google_auth_mod
 from parser import parse_bill as parse_bill_tesseract
 from parser_byok import parse_bill_with_byok
 from parser_freellmapi import parse_bill_with_freellmapi
+from parser_openai_compat import KeyExhaustedError
 from translation import classify_line_item, enrich_parsed
 
 logger = logging.getLogger("utility_tracker")
@@ -167,6 +168,16 @@ async def _init_sqlite(db) -> None:
         await db.execute(
             "ALTER TABLE user_api_keys ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0"
         )
+    # Tracking columns for the auto-fallback chain. `last_used_at` lets
+    # us pick the least-recently-used healthy key (LRU = round-robin
+    # without a counter); `last_error` + `last_error_at` mark a key as
+    # temporarily exhausted so the chain skips it for ~1 hour.
+    if "last_used_at" not in key_cols:
+        await db.execute("ALTER TABLE user_api_keys ADD COLUMN last_used_at TEXT")
+    if "last_error" not in key_cols:
+        await db.execute("ALTER TABLE user_api_keys ADD COLUMN last_error TEXT")
+    if "last_error_at" not in key_cols:
+        await db.execute("ALTER TABLE user_api_keys ADD COLUMN last_error_at TEXT")
 
 
 async def _init_postgres(db) -> None:
@@ -222,6 +233,10 @@ async def _init_postgres(db) -> None:
     await db.execute(
         "ALTER TABLE user_api_keys ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT false"
     )
+    # Tracking columns for the auto-fallback chain. See SQLite path above.
+    await db.execute("ALTER TABLE user_api_keys ADD COLUMN IF NOT EXISTS last_used_at TEXT")
+    await db.execute("ALTER TABLE user_api_keys ADD COLUMN IF NOT EXISTS last_error TEXT")
+    await db.execute("ALTER TABLE user_api_keys ADD COLUMN IF NOT EXISTS last_error_at TEXT")
     await db.execute("CREATE INDEX IF NOT EXISTS bills_user_id_idx ON bills(user_id)")
     await db.execute("CREATE INDEX IF NOT EXISTS user_api_keys_user_id_idx ON user_api_keys(user_id)")
     # Same partial unique index as on SQLite; without it, two concurrent
@@ -708,6 +723,17 @@ async def upload_bill(
             model=model,
         )
         parsed = enrich_parsed(parsed)  # add translations locally — no API call
+    except HTTPException:
+        # The auto-fallback chain raises HTTPExceptions with structured
+        # details (`no_keys`, `all_keys_exhausted`, per-key `failures`)
+        # that the frontend pattern-matches on. Don't swallow them into
+        # the generic "low_quality" failure path below or that structure
+        # is lost. Tidy up the upload artefact before re-raising.
+        try:
+            os.remove(save_path)
+        except OSError:
+            pass
+        raise
     except Exception as e:
         logger.exception("Bill parsing failed for %s (backend=%s)", filename, effective_parser)
         parse_error = f"{type(e).__name__}: {e}"
@@ -885,6 +911,193 @@ async def upload_bill(
     return {"id": bill_id, "parsed": parsed, "replaced": replaced}
 
 
+# How long to consider a key "exhausted" after a rate-limit / out-of-credits
+# / auth-failed response from upstream. After this window the auto-fallback
+# chain treats the key as healthy again and retries it. One hour balances
+# being responsive (free-tier rate limits typically reset every minute or
+# every day, so we shouldn't overshoot egregiously) and avoiding
+# back-to-back hammering of a provider that just returned 429.
+_BYOK_EXHAUSTED_WINDOW_SEC = 3600.0
+
+
+def _is_key_currently_exhausted(row: dict, now_iso: str | None = None) -> bool:
+    """Whether `row.last_error_at` is recent enough to skip this key in
+    the auto-fallback chain. `last_error_at` older than the cooldown
+    window means the key is presumed healthy again."""
+    err_at = row.get("last_error_at")
+    if not err_at:
+        return False
+    try:
+        err_dt = datetime.fromisoformat(err_at)
+    except (TypeError, ValueError):
+        return False
+    if err_dt.tzinfo is None:
+        err_dt = err_dt.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - err_dt).total_seconds()
+    return age < _BYOK_EXHAUSTED_WINDOW_SEC
+
+
+async def _list_user_byok_keys_lru(user_id: str) -> list[dict]:
+    """Return all of a user's BYOK keys, ordered for the auto-fallback
+    chain: least-recently-used first (NULL `last_used_at` first), so
+    distributing N uploads across K keys naturally round-robins.
+
+    The healthy/exhausted partition is applied at try-time inside the
+    chain so a key that just exhausted in the same request doesn't get
+    retried — this list is the *ordering*, not the filter.
+    """
+    async with _db() as db:
+        async with db.execute(
+            "SELECT id, user_id, label, provider, encrypted_key, iv, tag, "
+            "default_model, base_url_override, is_default, "
+            "last_used_at, last_error, last_error_at "
+            "FROM user_api_keys WHERE user_id = ? "
+            # NULL last_used_at sorts first across both SQLite and
+            # Postgres because both treat NULL as smaller than any
+            # value in ASC order.
+            "ORDER BY last_used_at ASC NULLS FIRST, created_at ASC"
+            if db_mod.is_postgres()
+            else
+            "SELECT id, user_id, label, provider, encrypted_key, iv, tag, "
+            "default_model, base_url_override, is_default, "
+            "last_used_at, last_error, last_error_at "
+            "FROM user_api_keys WHERE user_id = ? "
+            # SQLite doesn't have NULLS FIRST/LAST; default ASC sort
+            # already places NULLs first, so plain ASC works.
+            "ORDER BY last_used_at ASC, created_at ASC",
+            (user_id,),
+        ) as c:
+            return [dict(r) for r in await c.fetchall()]
+
+
+async def _mark_byok_key_used(user_id: str, key_id: str) -> None:
+    """Record a successful use of `key_id`: clear any prior exhaustion
+    flag and bump `last_used_at` so the round-robin LRU ordering
+    distributes the next upload to a different healthy key."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with _db() as db:
+        await db.execute(
+            "UPDATE user_api_keys "
+            "SET last_used_at = ?, last_error = NULL, last_error_at = NULL "
+            "WHERE id = ? AND user_id = ?",
+            (now, key_id, user_id),
+        )
+        await db.commit()
+
+
+async def _mark_byok_key_exhausted(
+    user_id: str, key_id: str, *, kind: str, message: str,
+) -> None:
+    """Record that `key_id` just failed in a way that warrants skipping
+    it for the rest of the cooldown window. The Settings tab surfaces
+    this as a red badge so the user knows which provider tripped."""
+    now = datetime.now(timezone.utc).isoformat()
+    # Stable code prefix so the frontend can render a typed badge
+    # without parsing free-form text.
+    encoded = f"{kind}: {message}"[:500]
+    async with _db() as db:
+        await db.execute(
+            "UPDATE user_api_keys SET last_error = ?, last_error_at = ? "
+            "WHERE id = ? AND user_id = ?",
+            (encoded, now, key_id, user_id),
+        )
+        await db.commit()
+
+
+def _decrypt_byok_key(row: dict) -> str:
+    """Decrypt a key row's stored ciphertext. Raises a user-friendly
+    RuntimeError on failure so the operator knows the key needs to be
+    re-added (typical cause: BYOK_ENCRYPTION_KEY rotated)."""
+    try:
+        return byok_mod.decrypt(row["encrypted_key"], row["iv"], row["tag"])
+    except Exception as e:
+        raise RuntimeError(
+            "Couldn't decrypt your saved API key. Re-add it from Settings."
+        ) from e
+
+
+async def _parse_with_byok_chain(
+    *, save_path: str, user_id: str, model: str | None,
+) -> dict:
+    """Try the user's BYOK keys in LRU order, marking each as exhausted
+    on rate-limit / out-of-credits / auth failures and falling over to
+    the next one. Raises 422 with an aggregated reason if all keys are
+    exhausted.
+
+    Generic `RuntimeError`s (parsing failures, malformed AI responses,
+    network errors that survived the retry budget) bubble up immediately
+    — trying another key won't help with those.
+    """
+    keys = await _list_user_byok_keys_lru(user_id)
+    if not keys:
+        raise HTTPException(
+            422,
+            detail={
+                "message": (
+                    "No API keys saved yet. Add one in Settings before "
+                    "uploading bills."
+                ),
+                "no_keys": True,
+            },
+        )
+
+    # Try healthy keys first (LRU among them), then exhausted ones as a
+    # last-resort retry — the cooldown window may have expired between
+    # the cached `last_error_at` and now-now.
+    healthy = [k for k in keys if not _is_key_currently_exhausted(k)]
+    exhausted = [k for k in keys if _is_key_currently_exhausted(k)]
+    ordered = healthy + exhausted
+
+    failures: list[dict] = []
+    for key_row in ordered:
+        try:
+            plaintext = _decrypt_byok_key(key_row)
+            parsed = await asyncio.to_thread(
+                parse_bill_with_byok,
+                save_path,
+                provider_id=key_row["provider"],
+                api_key=plaintext,
+                model=model or key_row.get("default_model"),
+                base_url_override=key_row.get("base_url_override"),
+            )
+        except KeyExhaustedError as e:
+            # Mark the key as exhausted so the next upload skips it,
+            # remember the reason for the aggregated error if every
+            # key fails, and fall over to the next key.
+            await _mark_byok_key_exhausted(
+                user_id, key_row["id"], kind=e.kind, message=str(e),
+            )
+            failures.append({
+                "label": key_row["label"],
+                "provider": key_row["provider"],
+                "kind": e.kind,
+                "message": str(e),
+            })
+            logger.info(
+                "BYOK fallback: key %r (%s) exhausted (%s); trying next",
+                key_row["label"], key_row["provider"], e.kind,
+            )
+            continue
+        # Success: clear the exhaustion flag (if any) and update LRU.
+        await _mark_byok_key_used(user_id, key_row["id"])
+        return parsed
+
+    # All keys exhausted. Surface a clear summary so the user knows
+    # which providers tripped and can rotate them in Settings.
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "message": (
+                "All saved API keys are currently rate-limited or rejected "
+                "by their providers. See Settings for per-key status. "
+                "Try again later or add another provider."
+            ),
+            "all_keys_exhausted": True,
+            "failures": failures,
+        },
+    )
+
+
 async def _parse_uploaded_bill(
     *,
     effective_parser: str,
@@ -898,6 +1111,11 @@ async def _parse_uploaded_bill(
     The parsers do CPU-ish OCR work and synchronous HTTP calls, so running them
     directly inside the FastAPI event loop blocks other users while a bill is
     being processed.
+
+    For BYOK, the user can either pin a specific `byok_key_id` (legacy
+    explicit-pick behaviour, still useful for "Test connection") OR
+    omit it and get the auto-fallback chain across all their saved
+    keys. The chain is the default for normal uploads.
     """
     if effective_parser == "claude":
         return await asyncio.to_thread(parse_bill_with_claude, save_path)
@@ -910,22 +1128,32 @@ async def _parse_uploaded_bill(
             model=model or FREELLMAPI_MODEL,
         )
     if effective_parser == "byok":
-        byok_row = await _resolve_byok_key(user_id, byok_key_id or "")
-        try:
-            plaintext_key = byok_mod.decrypt(
-                byok_row["encrypted_key"], byok_row["iv"], byok_row["tag"],
-            )
-        except Exception as e:
-            raise RuntimeError(
-                "Couldn't decrypt your saved API key. Re-add it from Settings."
-            ) from e
-        return await asyncio.to_thread(
-            parse_bill_with_byok,
-            save_path,
-            provider_id=byok_row["provider"],
-            api_key=plaintext_key,
-            model=model or byok_row.get("default_model"),
-            base_url_override=byok_row.get("base_url_override"),
+        if byok_key_id:
+            # User explicitly picked one key — single-shot, no fallback.
+            byok_row = await _resolve_byok_key(user_id, byok_key_id)
+            plaintext_key = _decrypt_byok_key(byok_row)
+            try:
+                parsed = await asyncio.to_thread(
+                    parse_bill_with_byok,
+                    save_path,
+                    provider_id=byok_row["provider"],
+                    api_key=plaintext_key,
+                    model=model or byok_row.get("default_model"),
+                    base_url_override=byok_row.get("base_url_override"),
+                )
+            except KeyExhaustedError as e:
+                # Still record the exhaustion so the badge updates,
+                # then re-raise so the upload fails (the user opted
+                # out of the chain by pinning this key).
+                await _mark_byok_key_exhausted(
+                    user_id, byok_row["id"], kind=e.kind, message=str(e),
+                )
+                raise
+            await _mark_byok_key_used(user_id, byok_row["id"])
+            return parsed
+        # No explicit key: round-robin across the user's saved keys.
+        return await _parse_with_byok_chain(
+            save_path=save_path, user_id=user_id, model=model,
         )
     return await asyncio.to_thread(parse_bill_tesseract, save_path)
 
@@ -1718,12 +1946,21 @@ async def byok_providers():
 
 @app.get("/api/byok-keys")
 async def byok_keys_list(user_id: str = Depends(get_user_id)):
-    """Return the caller's saved keys with masked values — never plaintext."""
+    """Return the caller's saved keys with masked values — never plaintext.
+
+    Each row also carries `is_exhausted` and `last_error` so the
+    Settings tab can show a red "rate limited" badge when the
+    auto-fallback chain has marked a key unhealthy. The frontend
+    can re-derive `is_exhausted` itself from `last_error_at`, but
+    computing it server-side keeps the cooldown window definition
+    in one place.
+    """
     _require_byok_configured()
     async with _db() as db:
         async with db.execute(
             "SELECT id, label, provider, encrypted_key, iv, tag, default_model, "
-            "base_url_override, is_default, created_at "
+            "base_url_override, is_default, created_at, "
+            "last_used_at, last_error, last_error_at "
             "FROM user_api_keys WHERE user_id = ? "
             "ORDER BY is_default DESC, created_at DESC",
             (user_id,),
@@ -1745,6 +1982,10 @@ async def byok_keys_list(user_id: str = Depends(get_user_id)):
             "base_url_override": row["base_url_override"],
             "is_default": bool(row["is_default"]),
             "created_at": row["created_at"],
+            "last_used_at": row["last_used_at"],
+            "last_error": row["last_error"],
+            "last_error_at": row["last_error_at"],
+            "is_exhausted": _is_key_currently_exhausted(dict(row)),
         })
     return out
 
