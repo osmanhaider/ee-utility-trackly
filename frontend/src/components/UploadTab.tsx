@@ -16,6 +16,33 @@ const UTILITY_ICONS: Record<string, string> = {
   other: "📄",
 };
 
+/**
+ * Coerce any extracted-bill field to a renderable string. Multi-tariff
+ * bills sometimes return structured objects (e.g.
+ * `{electricity_day: 9494, electricity_night: 7283}`) for fields the
+ * schema documents as scalar; React 19 throws "Objects are not valid
+ * as a React child" (error #31) when those slip into JSX. The backend
+ * now normalises these in `enrich_parsed`, but stored bills uploaded
+ * before that fix still have raw dicts in `raw_json`, so we defend
+ * here too. Returns null for empty values so the row is skipped.
+ */
+function renderScalar(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") return value || null;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    const parts = value.filter(v => v != null).map(v => renderScalar(v) ?? "");
+    return parts.length ? parts.join(", ") : null;
+  }
+  if (typeof value === "object") {
+    const parts = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v != null)
+      .map(([k, v]) => `${k}: ${renderScalar(v) ?? ""}`);
+    return parts.length ? parts.join(", ") : null;
+  }
+  return String(value);
+}
+
 const MAX_FILE_BYTES = 25 * 1024 * 1024; // 25 MB — must match backend MAX_UPLOAD_BYTES
 const MAX_FILE_MB = MAX_FILE_BYTES / (1024 * 1024);
 
@@ -431,23 +458,25 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
               {UTILITY_ICONS[parsed.utility_type as string] || "📄"} Extracted Details
             </h3>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px 24px" }}>
-              {[
+              {([
                 ["Provider", parsed.provider],
                 ["Type", parsed.utility_type],
-                ["Amount", parsed.amount_eur != null ? `€${(parsed.amount_eur as number).toFixed(2)}` : null],
+                ["Amount", typeof parsed.amount_eur === "number" ? `€${parsed.amount_eur.toFixed(2)}` : parsed.amount_eur],
                 ["Bill Date", parsed.bill_date],
-                ["Period", parsed.period_en ?? (parsed.period_start && parsed.period_end ? `${parsed.period_start} → ${parsed.period_end}` : parsed.period)],
-                ["Consumption", parsed.consumption_kwh != null ? `${parsed.consumption_kwh} kWh` : parsed.consumption_m3 != null ? `${parsed.consumption_m3} m³` : null],
+                ["Period", parsed.period_en ?? (parsed.period_start && parsed.period_end ? `${renderScalar(parsed.period_start) ?? ""} → ${renderScalar(parsed.period_end) ?? ""}` : parsed.period)],
+                ["Consumption", parsed.consumption_kwh != null ? `${renderScalar(parsed.consumption_kwh)} kWh` : parsed.consumption_m3 != null ? `${renderScalar(parsed.consumption_m3)} m³` : null],
                 ["Account", parsed.account_number],
                 ["Confidence", parsed.confidence],
-              ].map(([label, value]) =>
-                value ? (
-                  <div key={String(label)}>
-                    <div style={{ fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.05em" }}>{String(label)}</div>
-                    <div style={{ fontSize: 14, color: "var(--text-1)", marginTop: 2 }}>{String(value)}</div>
+              ] as Array<[string, unknown]>).map(([label, value]) => {
+                const text = renderScalar(value);
+                if (!text) return null;
+                return (
+                  <div key={label}>
+                    <div style={{ fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
+                    <div style={{ fontSize: 14, color: "var(--text-1)", marginTop: 2 }}>{text}</div>
                   </div>
-                ) : null
-              )}
+                );
+              })}
             </div>
           </div>
 
@@ -476,10 +505,10 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
                 <tbody>
                   {(parsed.line_items as Array<Record<string, unknown>>).map((li, i) => (
                     <tr key={i} style={{ borderBottom: "1px solid var(--divider)" }}>
-                      <td style={{ padding: "8px 8px 8px 0", color: "var(--text-2)" }}>{String(li.description_et ?? "—")}</td>
-                      <td style={{ padding: "8px 0", color: "var(--text-1)" }}>{String(li.description_en ?? "—")}</td>
+                      <td style={{ padding: "8px 8px 8px 0", color: "var(--text-2)" }}>{renderScalar(li.description_et) ?? "—"}</td>
+                      <td style={{ padding: "8px 0", color: "var(--text-1)" }}>{renderScalar(li.description_en) ?? "—"}</td>
                       <td style={{ padding: "8px 0", textAlign: "right", color: "var(--success)", fontVariantNumeric: "tabular-nums" }}>
-                        {li.amount_eur != null ? `€${(li.amount_eur as number).toFixed(2)}` : "—"}
+                        {typeof li.amount_eur === "number" ? `€${li.amount_eur.toFixed(2)}` : (renderScalar(li.amount_eur) ?? "—")}
                       </td>
                     </tr>
                   ))}

@@ -613,11 +613,66 @@ def generate_summary(parsed: dict) -> str:
     return " ".join(parts)
 
 
+def _normalize_scalar(value):
+    """Coerce a documented-scalar field that the AI returned as a dict
+    or a list into a renderable string. Multi-tariff bills tempt LLMs
+    into returning structured meter readings like
+    ``{"electricity_day": 9494, "electricity_night": 7283}`` for a
+    field the schema documents as a single number — and the frontend
+    crashes (React error #31) when fed that object directly. Flatten
+    to ``"electricity_day: 9494, electricity_night: 7283"`` so the
+    information survives without breaking the UI.
+
+    Empty containers collapse to ``None`` so the frontend's
+    truthy-check still skips the row instead of rendering an empty
+    label.
+    """
+    if isinstance(value, dict):
+        parts = [f"{k}: {v}" for k, v in value.items() if v is not None]
+        return ", ".join(parts) if parts else None
+    if isinstance(value, list):
+        parts = [str(x) for x in value if x is not None]
+        return ", ".join(parts) if parts else None
+    return value
+
+
+# Fields documented in the extraction prompt as scalar (string or
+# numeric). Anything an LLM returns that's a dict / list on these
+# names is by definition a schema violation we want to repair.
+_SCALAR_FIELDS = (
+    "provider",
+    "utility_type",
+    "amount_eur",
+    "consumption_kwh",
+    "consumption_m3",
+    "bill_date",
+    "period_start",
+    "period_end",
+    "period",
+    "account_number",
+    "address",
+    "vat_amount",
+    "amount_without_vat",
+    "meter_reading_start",
+    "meter_reading_end",
+    "due_date",
+    "confidence",
+)
+
+
 def enrich_parsed(parsed: dict) -> dict:
     """
     Take the raw dict from Claude (extraction only) and add all
     translation fields without any API call.
     """
+    # Defend against AI parsers that return a dict or list for fields
+    # the schema documents as scalar — see `_normalize_scalar`. We
+    # mutate a copy so the caller's dict isn't surprised by the
+    # rewrite.
+    parsed = {
+        k: _normalize_scalar(v) if k in _SCALAR_FIELDS else v
+        for k, v in parsed.items()
+    }
     # Translate line items
     raw_items = parsed.get("line_items") or []
     translated_items = translate_line_items(raw_items)

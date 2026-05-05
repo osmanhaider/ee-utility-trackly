@@ -802,6 +802,100 @@ def test_glossary_fallback_runs_when_ai_did_not_translate():
     assert items[1]["description_en"]
 
 
+# ─── Multi-tariff meter readings: enrich_parsed normalises dict-typed scalars ─
+
+def test_enrich_parsed_flattens_dict_meter_readings_to_string():
+    """Multi-tariff Estonian bills (separate day/night electricity, hot/cold
+    water on the same invoice) tempt LLMs into returning a dict like
+    `{"electricity_day": 9494, "cold_water": 443.5}` for fields the
+    schema documents as scalar. The frontend then crashes with React
+    error #31 ('Objects are not valid as a React child') because the
+    grid renderer feeds the dict straight into JSX. enrich_parsed
+    must normalise these to a renderable string."""
+    from translation import enrich_parsed
+
+    parsed = {
+        "provider": "Eesti Energia",
+        "amount_eur": 75.0,
+        "meter_reading_start": {
+            "electricity_day": 9494,
+            "electricity_night": 7283,
+            "cold_water": 443.5,
+            "hot_water": 220.1,
+        },
+        "meter_reading_end": {
+            "electricity_day": 9559,
+            "electricity_night": 7340,
+            "cold_water": 446.2,
+            "hot_water": 222.8,
+        },
+        "line_items": [],
+    }
+    out = enrich_parsed(parsed)
+    assert isinstance(out["meter_reading_start"], str), (
+        "Dict-typed meter_reading_start must be flattened to a string "
+        "so the frontend grid renderer doesn't crash"
+    )
+    # Format is "key: value, key: value …" — preserves all the
+    # information without losing any tariff.
+    s = out["meter_reading_start"]
+    assert "electricity_day: 9494" in s
+    assert "cold_water: 443.5" in s
+    # Symmetric handling for meter_reading_end.
+    assert isinstance(out["meter_reading_end"], str)
+    assert "electricity_day: 9559" in out["meter_reading_end"]
+
+
+def test_enrich_parsed_leaves_already_scalar_meter_readings_alone():
+    """When the AI follows the schema and returns a number, the field
+    stays a number — the frontend has number-friendly formatting
+    (€-prefix, .toFixed) that we shouldn't break for the common case."""
+    from translation import enrich_parsed
+
+    parsed = {
+        "provider": "Eesti Energia",
+        "amount_eur": 50.0,
+        "meter_reading_start": 9494,
+        "meter_reading_end": 9559,
+        "line_items": [],
+    }
+    out = enrich_parsed(parsed)
+    assert out["meter_reading_start"] == 9494
+    assert out["meter_reading_end"] == 9559
+
+
+def test_enrich_parsed_collapses_empty_dict_to_none():
+    """An empty dict for a documented-scalar field is just noise —
+    collapse it to None so the frontend's truthy-check skips the row
+    entirely instead of rendering an empty label."""
+    from translation import enrich_parsed
+
+    parsed = {
+        "provider": "Eesti Energia",
+        "amount_eur": 50.0,
+        "meter_reading_start": {},
+        "line_items": [],
+    }
+    out = enrich_parsed(parsed)
+    assert out["meter_reading_start"] is None
+
+
+def test_enrich_parsed_handles_list_typed_scalars_too():
+    """Less common but seen in the wild: AI returns a list of values
+    instead of a dict (e.g. [9494, 7283]). Same fix applies — flatten
+    to a renderable string so React doesn't crash."""
+    from translation import enrich_parsed
+
+    parsed = {
+        "provider": "Eesti Energia",
+        "amount_eur": 50.0,
+        "meter_reading_start": [9494, 7283],
+        "line_items": [],
+    }
+    out = enrich_parsed(parsed)
+    assert out["meter_reading_start"] == "9494, 7283"
+
+
 def test_ai_english_equal_to_estonian_falls_back_to_glossary():
     """Some AI parsers, when uncertain, just echo the source text in
     both fields. Treat that as 'no translation provided' and fall back
