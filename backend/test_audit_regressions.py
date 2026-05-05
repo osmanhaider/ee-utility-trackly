@@ -729,6 +729,95 @@ def test_bill_with_no_amount_eur_still_shows_in_monthly_total(app):
     assert by_year["2026"]["total_eur"] == 42.5
 
 
+# ─── Fix: AI-provided line-item English translations are preserved ───
+# Previously `translate_line_items` always overwrote `description_en`
+# with `translate_term(description_et)`, which only knows Estonian. For
+# bills uploaded via BYOK / FreeLLMAPI / Claude in non-Estonian formats
+# (Spanish, German, Italian, …) that meant the AI's perfectly good
+# English translation got replaced with title-cased original text:
+# "Electricidad Consumida" instead of "Electricity used".
+
+def test_ai_provided_english_is_preserved_for_non_estonian_bills():
+    """Spanish bill via BYOK: AI returns both the original Spanish
+    `description_et` and a real English translation. The English must
+    survive `translate_line_items` rather than being clobbered into
+    title-cased Spanish."""
+    from translation import translate_line_items
+
+    items = translate_line_items([
+        {
+            "description_et": "Electricidad consumida",
+            "description_en": "Electricity used",
+            "amount_eur": 30.0,
+        },
+        {
+            "description_et": "Cargo fijo de red",
+            "description_en": "Network standing charge",
+            "amount_eur": 5.0,
+        },
+    ])
+    assert items[0]["description_en"] == "Electricity used", (
+        "AI-supplied translation must not be overwritten by glossary "
+        "fallback (which would title-case the Spanish original)"
+    )
+    assert items[1]["description_en"] == "Network standing charge"
+
+
+def test_estonian_term_with_ai_translation_keeps_ai_value():
+    """Trade-off documented in the helper: when the AI also provides a
+    `description_en` for an Estonian term, we trust the AI rather than
+    overriding with the local glossary. Modern AI does decent Estonian,
+    and consistency-with-AI beats consistency-with-glossary when the
+    AI explicitly opined."""
+    from translation import translate_line_items
+
+    items = translate_line_items([
+        {
+            "description_et": "Elektrienergia",
+            "description_en": "Electricity",
+            "amount_eur": 30.0,
+        },
+    ])
+    assert items[0]["description_en"] == "Electricity"
+
+
+def test_glossary_fallback_runs_when_ai_did_not_translate():
+    """Local Tesseract path (and AI responses where the LLM left
+    `description_en` blank) must still trigger the curated Estonian
+    glossary lookup so users see real English instead of title-cased
+    Estonian."""
+    from translation import translate_line_items
+
+    items = translate_line_items([
+        {"description_et": "Elektrienergia", "amount_eur": 30.0},
+        {"description_et": "Külm vesi", "description_en": "", "amount_eur": 10.0},
+    ])
+    # GLOSSARY maps "elektrienergia" → "Electricity" (or similar),
+    # "külm vesi" → "Cold water". Whatever the exact glossary value is,
+    # it must NOT be the title-cased Estonian.
+    assert items[0]["description_en"] != "Elektrienergia"
+    assert items[1]["description_en"] != "Külm Vesi"
+    # And it must be non-empty.
+    assert items[0]["description_en"]
+    assert items[1]["description_en"]
+
+
+def test_ai_english_equal_to_estonian_falls_back_to_glossary():
+    """Some AI parsers, when uncertain, just echo the source text in
+    both fields. Treat that as 'no translation provided' and fall back
+    to the glossary so the curated Estonian lookup still kicks in."""
+    from translation import translate_line_items
+
+    items = translate_line_items([
+        {
+            "description_et": "Elektrienergia",
+            "description_en": "elektrienergia",  # same word, different case
+            "amount_eur": 30.0,
+        },
+    ])
+    assert items[0]["description_en"].casefold() != "elektrienergia"
+
+
 def test_get_on_google_redirect_bounces_to_login_with_cold_start_error(
     app, monkeypatch: pytest.MonkeyPatch
 ):
