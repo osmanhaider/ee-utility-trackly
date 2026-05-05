@@ -11,6 +11,37 @@ const UTILITY_ICONS: Record<string, string> = {
   heating: "♨️", internet: "🌐", waste: "🗑️", other: "📄",
 };
 
+/**
+ * Render any extracted-bill field as a string we can safely drop into
+ * JSX. The backend now normalises documented-scalar fields in
+ * `enrich_parsed`, but old bills already stored before that landed
+ * still have raw dicts / arrays in their `raw_json` (e.g. multi-tariff
+ * bills where the AI returned `{electricity_day: 9494,
+ * electricity_night: 7283}` for `meter_reading_start`). Without this
+ * coercion React 19 throws "Objects are not valid as a React child"
+ * (error #31) and the whole Bills tab crashes when the user expands
+ * one of those rows.
+ *
+ * Returns `null` for empty / missing values so the calling renderer
+ * can skip the row entirely instead of showing an empty label.
+ */
+function renderScalar(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") return value || null;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    const parts = value.filter(v => v != null).map(v => renderScalar(v) ?? "");
+    return parts.length ? parts.join(", ") : null;
+  }
+  if (typeof value === "object") {
+    const parts = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v != null)
+      .map(([k, v]) => `${k}: ${renderScalar(v) ?? ""}`);
+    return parts.length ? parts.join(", ") : null;
+  }
+  return String(value);
+}
+
 const TYPE_COLORS: Record<string, string> = {
   electricity: "#f59e0b", gas: "#f97316", water: "#3b82f6",
   heating: "#ef4444", internet: "#8b5cf6", waste: "#6b7280", other: "#9ca3af",
@@ -497,24 +528,28 @@ export default function BillsTab({ onDataChange }: BillsTabProps = {}) {
                   )}
 
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: "12px 24px" }}>
-                    {[
+                    {([
                       ["Account #", bill.account_number],
                       ["Address", bill.address],
                       ["Filename", bill.filename],
-                      ["Uploaded", fmtLocal(bill.upload_date)?.absolute],
+                      ["Uploaded", fmtLocal(bill.upload_date)?.absolute ?? null],
                       ["Due Date", raw.due_date],
                       ["Period (EN)", raw.period_en ?? raw.period],
-                      ["VAT", raw.vat_amount != null ? `€${raw.vat_amount}` : null],
-                      ["Without VAT", raw.amount_without_vat != null ? `€${raw.amount_without_vat}` : null],
+                      ["VAT", raw.vat_amount != null ? `€${renderScalar(raw.vat_amount)}` : null],
+                      ["Without VAT", raw.amount_without_vat != null ? `€${renderScalar(raw.amount_without_vat)}` : null],
                       ["Meter Start", raw.meter_reading_start],
                       ["Meter End", raw.meter_reading_end],
                       ["Confidence", raw.confidence],
-                    ].map(([label, val]) => val ? (
-                      <div key={label as string}>
-                        <div style={{ fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
-                        <div style={{ fontSize: 13, color: "var(--text-1)", marginTop: 2, wordBreak: "break-all" }}>{val as string}</div>
-                      </div>
-                    ) : null)}
+                    ] as Array<[string, unknown]>).map(([label, val]) => {
+                      const text = renderScalar(val);
+                      if (!text) return null;
+                      return (
+                        <div key={label}>
+                          <div style={{ fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
+                          <div style={{ fontSize: 13, color: "var(--text-1)", marginTop: 2, wordBreak: "break-all" }}>{text}</div>
+                        </div>
+                      );
+                    })}
                   </div>
 
                   {Array.isArray(raw.line_items) && raw.line_items.length > 0 && (
@@ -534,10 +569,10 @@ export default function BillsTab({ onDataChange }: BillsTabProps = {}) {
                         <tbody>
                           {(raw.line_items as Array<Record<string, unknown>>).map((li, i) => (
                             <tr key={i} style={{ borderBottom: "1px solid var(--divider)" }}>
-                              <td style={{ padding: "6px 8px 6px 0", color: "var(--text-2)" }}>{String(li.description_et ?? "—")}</td>
-                              <td style={{ padding: "6px 0", color: "var(--text-1)" }}>{String(li.description_en ?? "—")}</td>
+                              <td style={{ padding: "6px 8px 6px 0", color: "var(--text-2)" }}>{renderScalar(li.description_et) ?? "—"}</td>
+                              <td style={{ padding: "6px 0", color: "var(--text-1)" }}>{renderScalar(li.description_en) ?? "—"}</td>
                               <td style={{ padding: "6px 0", textAlign: "right", color: "var(--success)", fontVariantNumeric: "tabular-nums" }}>
-                                {li.amount_eur != null ? `€${(li.amount_eur as number).toFixed(2)}` : "—"}
+                                {typeof li.amount_eur === "number" ? `€${li.amount_eur.toFixed(2)}` : (renderScalar(li.amount_eur) ?? "—")}
                               </td>
                             </tr>
                           ))}
