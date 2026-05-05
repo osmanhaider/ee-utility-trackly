@@ -498,13 +498,40 @@ def translate_term(term: str) -> str:
 
 def translate_line_items(raw_items: list[dict]) -> list[dict]:
     """
-    Add description_en to each line item using the hardcoded glossary.
-    Expects items with at least description_et (or description).
+    Add `description_en` to each line item.
+
+    Two paths, in priority order:
+
+    1. **Trust AI-provided translations.** When the parser is an LLM
+       (Claude / FreeLLMAPI / BYOK), it returns BOTH `description_et`
+       (the raw original-language description) and `description_en`
+       (its English translation). For non-Estonian bills — Spanish,
+       German, Italian, anything outside the local glossary — the AI
+       is the only thing that can produce a sensible English label.
+       If we always overwrote `description_en` with `translate_term`,
+       those bills would get title-cased original text in the English
+       column ("Electricidad Consumida" instead of "Electricity used")
+       because the Estonian glossary has no entries for those
+       languages and `translate_term` falls through to `raw.title()`.
+
+       So: if the AI gave us a non-empty `description_en` that isn't
+       just an echo of `description_et`, we keep it as-is.
+
+    2. **Glossary fallback.** When the parser is local Tesseract OCR
+       (no AI involved) `description_en` is blank, so we run the
+       Estonian-specific `translate_term` to look up the curated
+       hardcoded translations. The same path also covers AI responses
+       where the LLM skipped the field or just echoed the source.
     """
     result = []
     for item in raw_items:
         et = str(item.get("description_et") or item.get("description") or "").strip()
-        en = translate_term(et) if et else ""
+        ai_en = str(item.get("description_en") or "").strip()
+        if et and ai_en and ai_en.casefold() != et.casefold():
+            # Real AI translation — keep it.
+            en = ai_en
+        else:
+            en = translate_term(et) if et else ""
         result.append({**item, "description_et": et, "description_en": en})
     return result
 
