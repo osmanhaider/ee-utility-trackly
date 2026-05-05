@@ -748,6 +748,7 @@ async def upload_bill(
     provider = parsed.get("provider")
     period_start = parsed.get("period_start")
     account_number = parsed.get("account_number")
+    utility_type = parsed.get("utility_type")
 
     replaced = False
     replaced_id: str | None = None
@@ -765,12 +766,24 @@ async def upload_bill(
             existing_row = await c.fetchone()
 
         # 2nd priority: same provider (case-insensitive) + same billing period
+        # + same utility type. The utility_type guard matters when one provider
+        # sends multiple distinct bills in the same month — e.g. Telia phone
+        # and Telia internet, or Eesti Gaas residential heating and gas
+        # cooking. Without it, the second upload would silently overwrite
+        # the first because (provider, period_start) alone matched.
+        # COALESCE-to-empty-string treats two NULL utility_types as equal
+        # (a bill the parser couldn't classify, re-uploaded later) and
+        # treats NULL vs a real type as different (likely two different
+        # bills, one of which the parser failed to classify).
         if not existing_row and provider and period_start:
             async with db.execute(
                 "SELECT id, filename FROM bills "
-                "WHERE LOWER(TRIM(provider)) = LOWER(TRIM(?)) AND period_start = ? AND user_id = ? "
+                "WHERE LOWER(TRIM(provider)) = LOWER(TRIM(?)) "
+                "AND period_start = ? "
+                "AND COALESCE(utility_type, '') = COALESCE(?, '') "
+                "AND user_id = ? "
                 "ORDER BY upload_date DESC LIMIT 1",
-                (provider, period_start, user_id),
+                (provider, period_start, utility_type, user_id),
             ) as c:
                 existing_row = await c.fetchone()
 
@@ -791,9 +804,10 @@ async def upload_bill(
                 "WHERE LOWER(TRIM(provider)) = LOWER(TRIM(?)) "
                 "AND account_number = ? "
                 "AND period_start IS NULL "
+                "AND COALESCE(utility_type, '') = COALESCE(?, '') "
                 "AND user_id = ? "
                 "ORDER BY upload_date DESC LIMIT 1",
-                (provider, account_number, user_id),
+                (provider, account_number, utility_type, user_id),
             ) as c:
                 existing_row = await c.fetchone()
 
