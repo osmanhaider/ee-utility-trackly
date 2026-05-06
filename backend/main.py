@@ -782,16 +782,24 @@ async def upload_bill(
     async with _db() as db:
         # All dedupe lookups are scoped to the caller's user_id so one
         # user's upload can never overwrite another user's bill.
-        # 1st priority: same filename → same physical file uploaded again
+        #
+        # NOTE: there used to be a "same filename" matcher above this
+        # block, on the theory that re-uploading the same physical
+        # file should dedupe even when the parser had a bad day. In
+        # practice users upload from phones / scanners that emit
+        # generic filenames like `scan.pdf` or `IMG.HEIC`, so any
+        # follow-up bill with the same filename — a totally unrelated
+        # invoice from a totally different provider — silently
+        # overwrote the previous one. The filename matcher was
+        # dropped; only content-derived signals (provider + period
+        # + type, or provider + account + type when period is
+        # missing) participate in dedup now. The cost: legitimate
+        # double-uploads of the same scanned file produce two rows
+        # the user can delete manually, which beats silently losing
+        # a bill they thought they'd uploaded.
         existing_row = None
-        async with db.execute(
-            "SELECT id, filename FROM bills WHERE filename = ? AND user_id = ? "
-            "ORDER BY upload_date DESC LIMIT 1",
-            (file.filename, user_id),
-        ) as c:
-            existing_row = await c.fetchone()
 
-        # 2nd priority: same provider (case-insensitive) + same billing period
+        # 1st priority: same provider (case-insensitive) + same billing period
         # + same utility type. The utility_type guard matters when one provider
         # sends multiple distinct bills in the same month — e.g. Telia phone
         # and Telia internet, or Eesti Gaas residential heating and gas
@@ -813,7 +821,7 @@ async def upload_bill(
             ) as c:
                 existing_row = await c.fetchone()
 
-        # 3rd priority: same provider (case-insensitive) + same account number,
+        # 2nd priority: same provider (case-insensitive) + same account number,
         # but ONLY as a fallback when the new upload has no period_start to
         # match on. Otherwise distinct billing periods (Jan vs Feb on the
         # same account) would be collapsed into one row, silently overwriting

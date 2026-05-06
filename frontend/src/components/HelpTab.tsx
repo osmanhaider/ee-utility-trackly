@@ -147,7 +147,7 @@ const TIPS: [string, string][] = [
   ["Public vs private", "Click the globe icon on a bill to toggle it private. Private bills only show on your own Bills tab and never appear in Community."],
   ["Pick a model", "On the Upload tab, the model dropdown reflects whatever is configured in your FreeLLMAPI dashboard. \"Auto\" lets the FreeLLMAPI router pick across your healthy provider keys."],
   ["Period-based grouping", "Analytics group by billing period, not invoice issue date. A March bill issued April 13 still counts as March."],
-  ["Duplicate detection", "Re-uploading a file with the same filename (or same provider + period) replaces the previous entry — you'll see an amber 'Existing bill replaced' banner."],
+  ["Duplicate detection", "Uploading a bill with the same provider, billing period, and utility type as one already on file replaces the previous entry — you'll see an amber 'Existing bill replaced' banner. Filename alone isn't used for matching, so two bills both saved as 'scan.pdf' are kept as separate rows."],
   ["Theme & contrast", "The sun/moon button in the header cycles Light → Dark → System. Your choice persists across sessions."],
 ];
 

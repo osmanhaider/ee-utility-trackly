@@ -1,23 +1,31 @@
 """Regression tests for the upload dedup logic in `POST /api/bills/upload`.
 
-The upload endpoint tries three matchers, in order:
-  1. Same filename for the same user
-  2. Same provider + same period_start + same utility_type for the same user
-  3. Same provider + same account_number + same utility_type for the same
+The upload endpoint tries two matchers, in order:
+  1. Same provider + same period_start + same utility_type for the same user
+  2. Same provider + same account_number + same utility_type for the same
      user — but only as a fallback when the new upload has NO period_start
      to match on, and the existing row also has no period_start
 
-Two real-world failure modes pinned down here:
+Three real-world failure modes pinned down here:
 
-A. Priority 3 used to fire whenever priority 2 missed, which silently
-   collapsed two bills from the same account but different billing
-   periods (Jan electric vs Feb electric) into one row, overwriting
-   the older month.
+A. The account-number matcher used to fire whenever the period matcher
+   missed, which silently collapsed two bills from the same account but
+   different billing periods (Jan electric vs Feb electric) into one row,
+   overwriting the older month.
 
-B. Priority 2 used to ignore utility_type, which silently collapsed
-   two distinct services from the same provider in the same month
-   (Telia phone + Telia internet, or Eesti Gaas heating + cooking)
+B. The period matcher used to ignore utility_type, which silently
+   collapsed two distinct services from the same provider in the same
+   month (Telia phone + Telia internet, or Eesti Gaas heating + cooking)
    into one row, overwriting the first.
+
+C. There used to be a "same filename" matcher above both content
+   matchers — the theory being that re-uploading the same physical file
+   should dedupe even when the parser had a bad day. In practice users
+   upload from phones and scanners that emit generic filenames like
+   `scan.pdf` / `IMG.HEIC`, so any new bill with the same filename — a
+   completely unrelated invoice from a different provider — silently
+   overwrote the previous one. The matcher was dropped; only content-
+   derived signals participate in dedup now.
 
 We don't drive a real PDF/Tesseract here; the parser is monkeypatched
 to return controlled dicts so the tests are deterministic and fast.
@@ -174,11 +182,15 @@ def test_same_provider_and_period_replaces_existing(app, monkeypatch: pytest.Mon
     assert bills[0]["amount_eur"] == 51.42
 
 
-def test_same_filename_replaces_existing_even_without_period(
+def test_re_upload_with_same_filename_and_same_account_still_dedupes(
     app, monkeypatch: pytest.MonkeyPatch
 ):
-    """Priority 1 (filename) should still catch a literal re-upload of
-    the same file even when the parser couldn't extract a period."""
+    """Re-uploading the same physical file with no period extracted
+    should still collapse onto the original row — but via the
+    provider+account+no-period matcher, NOT via filename. The same
+    filename across both uploads is incidental; what makes them
+    actually-duplicate is matching content (same provider, same
+    account, neither has a period)."""
     main_mod, client = app
     headers = _bearer(main_mod)
 
@@ -200,15 +212,87 @@ def test_same_filename_replaces_existing_even_without_period(
 
     assert first["replaced"] is False
     assert second["replaced"] is True
-    assert first["id"] == second["id"]
+
+
+def test_same_generic_filename_across_unrelated_bills_does_not_merge(
+    app, monkeypatch: pytest.MonkeyPatch
+):
+    """Real bug from a user report: uploading an electricity bill and
+    a separate management (korteriühistu) bill — both saved by the
+    phone / scanner under generic filenames like `scan.pdf` — used
+    to silently collapse into one row because the dedup chain ran a
+    filename-match BEFORE the content-based matchers. Different
+    providers, different periods, different utility types: by every
+    content signal these are unrelated bills, and the filename
+    coincidence shouldn't override that.
+
+    With the filename matcher dropped, both rows survive and the user
+    sees what they actually uploaded."""
+    main_mod, client = app
+    headers = _bearer(main_mod)
+
+    _patch_parser(main_mod, monkeypatch, [
+        {
+            "provider": "Eesti Energia",
+            "utility_type": "electricity",
+            "amount_eur": 50.0,
+            "period_start": "2026-03-01",
+            "period_end": "2026-03-31",
+        },
+        {
+            "provider": "Tehnika TN 22 Korteriühistu",
+            "utility_type": "other",
+            "amount_eur": 217.29,
+            "period_start": "2026-03-01",
+            "period_end": "2026-03-31",
+        },
+    ])
+
+    electricity = _upload(client, headers, "scan.pdf")
+    management = _upload(client, headers, "scan.pdf")
+
+    assert electricity["replaced"] is False
+    assert management["replaced"] is False, (
+        "Generic filename match must not collapse two unrelated bills "
+        "into one row — the management bill should be a new row, not "
+        "a replacement of the electricity bill"
+    )
+
+    bills = _list_bills(client, headers)
+    providers = sorted(b["provider"] for b in bills)
+    assert providers == ["Eesti Energia", "Tehnika TN 22 Korteriühistu"]
+
+
+def test_same_generic_filename_unparsed_bills_do_not_merge(
+    app, monkeypatch: pytest.MonkeyPatch
+):
+    """Edge case: two unrelated bills saved with the same filename
+    where the parser failed to classify either one (no provider in
+    either parsed dict). Without filename matching, the chain has
+    nothing to dedupe on, so both rows survive — which is the safer
+    default than silently collapsing them."""
+    main_mod, client = app
+    headers = _bearer(main_mod)
+
+    _patch_parser(main_mod, monkeypatch, [
+        {"amount_eur": 12.34},
+        {"amount_eur": 56.78},
+    ])
+
+    a = _upload(client, headers, "scan.pdf")
+    b = _upload(client, headers, "scan.pdf")
+    assert a["replaced"] is False
+    assert b["replaced"] is False
+    assert a["id"] != b["id"]
+    assert len(_list_bills(client, headers)) == 2
 
 
 def test_account_number_fallback_only_when_neither_has_period(
     app, monkeypatch: pytest.MonkeyPatch
 ):
     """If both uploads have no period_start, the provider+account
-    fallback may merge them (parser-failure re-upload of the same bill).
-    Filename differs so priority 1 doesn't trigger."""
+    fallback may merge them (parser-failure re-upload of the same
+    bill)."""
     main_mod, client = app
     headers = _bearer(main_mod)
 
