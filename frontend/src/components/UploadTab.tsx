@@ -3,8 +3,32 @@ import axios from "axios";
 import { api, type ByokKey } from "../api";
 import {
   Upload, CheckCircle, AlertCircle, Loader2, RefreshCw, FileText, X,
-  ChevronDown, ChevronUp,
+  ChevronDown, ChevronUp, ScanLine, Sparkles,
 } from "lucide-react";
+
+// Persisted across sessions so the user doesn't have to re-pick on every visit.
+const EXTRACTION_METHOD_KEY = "trackly:extraction-method";
+
+/**
+ * Two extraction strategies the user can pick between:
+ *  - "ocr" → local Tesseract + regex (no API calls, free, Estonian-tuned).
+ *  - "ai"  → routed through the user's saved BYOK keys via the auto-fallback
+ *           chain (any invoice format/language, but consumes API quota).
+ *
+ * The backend has always supported both; this is the UI gate that brings
+ * OCR back as an explicit user choice alongside the AI flow.
+ */
+type ExtractionMethod = "ocr" | "ai";
+
+function loadExtractionMethod(): ExtractionMethod {
+  try {
+    const v = localStorage.getItem(EXTRACTION_METHOD_KEY);
+    if (v === "ocr" || v === "ai") return v;
+  } catch {
+    // localStorage may be disabled (Safari private mode etc.) — fall through.
+  }
+  return "ai";
+}
 
 const UTILITY_ICONS: Record<string, string> = {
   electricity: "⚡",
@@ -77,6 +101,15 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
   const [dragging, setDragging] = useState(false);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [running, setRunning] = useState(false);
+  const [method, setMethod] = useState<ExtractionMethod>(loadExtractionMethod);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(EXTRACTION_METHOD_KEY, method);
+    } catch {
+      // Storage may be unavailable; the choice just won't persist.
+    }
+  }, [method]);
 
   // Mirror running state to the parent so it can render a navigation hint.
   useEffect(() => {
@@ -133,11 +166,12 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
       if (item.status !== "pending") continue;
       updateItem(item.id, { status: "uploading" });
       try {
-        // Always BYOK with no explicit key id — the backend rotates
-        // through the user's saved keys (LRU among healthy ones,
-        // skipping any that just got rate-limited). The user manages
-        // the key set in Settings; per-upload key picking is gone.
-        const res = await api.uploadBill(item.file, "byok");
+        // OCR uses the local Tesseract pipeline; AI uses the BYOK
+        // auto-fallback chain (LRU across the user's healthy saved
+        // keys). The choice is persisted in localStorage so the
+        // dropzone defaults to whatever the user picked last.
+        const parser = method === "ocr" ? "tesseract" : "byok";
+        const res = await api.uploadBill(item.file, parser);
         const parsed = res.data.parsed;
         const lowQuality = Boolean(parsed?._low_quality);
         if (lowQuality) {
@@ -174,7 +208,7 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
     if (successCount > 0 && problemCount === 0) {
       setTimeout(onSuccess, 2000);
     }
-  }, [updateItem, onSuccess, reloadByokKeys]);
+  }, [updateItem, onSuccess, reloadByokKeys, method]);
 
   const addFiles = useCallback((files: File[]) => {
     if (files.length === 0) return;
@@ -245,28 +279,86 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
         Drop one or more files (up to {MAX_FILE_MB} MB each) to extract data.
       </p>
 
-      {/* Auto-routing status: replaces the old parser-mode picker.
-          Bills always go through the user's saved BYOK keys; the
-          backend chooses which one round-robin and falls over to the
-          next when one's rate-limited. */}
+      {/* Extraction method picker — OCR (local, free) vs AI (BYOK auto-fallback).
+          The choice persists across sessions via localStorage. The contextual
+          banner below adapts to the selection so the user knows what to
+          expect (no setup vs. needs healthy keys, Estonian-tuned vs.
+          any-format). */}
       <div style={{ ...cardStyle, marginBottom: 16, padding: 14 }}>
-        {allKeysExhausted ? (
-          <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+        <div style={{ fontSize: 11, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600, marginBottom: 8 }}>
+          Extraction method
+        </div>
+        <div
+          role="radiogroup"
+          aria-label="Extraction method"
+          style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}
+        >
+          <MethodOption
+            active={method === "ocr"}
+            onClick={() => !running && setMethod("ocr")}
+            disabled={running}
+            icon={<ScanLine size={16} />}
+            title="OCR"
+            subtitle="Local · free · Estonian-tuned"
+          />
+          <MethodOption
+            active={method === "ai"}
+            onClick={() => !running && setMethod("ai")}
+            disabled={running}
+            icon={<Sparkles size={16} />}
+            title="AI"
+            subtitle="Your saved API keys · any format"
+          />
+        </div>
+
+        {method === "ocr" ? (
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", marginTop: 12 }}>
+            <ScanLine size={16} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 3 }} />
+            <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+              <div style={{ color: "var(--text-1)", fontWeight: 600, marginBottom: 2 }}>
+                Local OCR — no API calls
+              </div>
+              <div style={{ color: "var(--text-3)", fontSize: 12 }}>
+                Uses Tesseract + native PDF text extraction with regex tuned for
+                Estonian utility bills. Works best for the standard
+                <em> korteriühistu</em> format. Free and offline; doesn't touch
+                your saved API keys.
+              </div>
+            </div>
+          </div>
+        ) : allKeysExhausted ? (
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", marginTop: 12 }}>
             <AlertCircle size={18} style={{ color: "var(--danger)", flexShrink: 0, marginTop: 2 }} />
             <div style={{ fontSize: 13, lineHeight: 1.5 }}>
               <div style={{ color: "var(--danger)", fontWeight: 600, marginBottom: 2 }}>
                 All saved API keys are currently rate-limited
               </div>
               <div style={{ color: "var(--text-2)" }}>
-                Wait a few minutes and try again, or add another provider in{" "}
-                <strong style={{ color: "var(--text-1)" }}>Settings</strong>.
-                Adding more keys lets the auto-fallback chain stay healthy.
+                Wait a few minutes and try again, add another provider in{" "}
+                <strong style={{ color: "var(--text-1)" }}>Settings</strong>,
+                or switch to <strong style={{ color: "var(--text-1)" }}>OCR</strong>{" "}
+                above to keep uploading without API calls.
+              </div>
+            </div>
+          </div>
+        ) : byokKeys.length === 0 ? (
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", marginTop: 12 }}>
+            <AlertCircle size={18} style={{ color: "var(--warning)", flexShrink: 0, marginTop: 2 }} />
+            <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+              <div style={{ color: "var(--warning)", fontWeight: 600, marginBottom: 2 }}>
+                No saved API keys
+              </div>
+              <div style={{ color: "var(--text-2)" }}>
+                Add a provider in <strong style={{ color: "var(--text-1)" }}>Settings</strong>{" "}
+                to use AI extraction, or switch to{" "}
+                <strong style={{ color: "var(--text-1)" }}>OCR</strong> above —
+                no setup needed.
               </div>
             </div>
           </div>
         ) : (
-          <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-            <Upload size={16} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 3 }} />
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", marginTop: 12 }}>
+            <Sparkles size={16} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 3 }} />
             <div style={{ fontSize: 13, lineHeight: 1.5 }}>
               <div style={{ color: "var(--text-1)", fontWeight: 600, marginBottom: 2 }}>
                 Auto-routing across {byokKeys.length} saved key{byokKeys.length === 1 ? "" : "s"}
@@ -277,9 +369,8 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
                 )}
               </div>
               <div style={{ color: "var(--text-3)", fontSize: 12 }}>
-                Manage keys in <strong style={{ color: "var(--text-1)" }}>Settings</strong>.
-                Each upload picks the least-recently-used healthy key, so adding more keys
-                spreads load and gives the chain somewhere to fall over.
+                Each upload picks the least-recently-used healthy key. Manage keys
+                in <strong style={{ color: "var(--text-1)" }}>Settings</strong>.
               </div>
             </div>
           </div>
@@ -569,6 +660,66 @@ export default function UploadTab({ onSuccess, onRunningChange, isActive }: Uplo
         </div>
       </div>
     </div>
+  );
+}
+
+interface MethodOptionProps {
+  active: boolean;
+  onClick: () => void;
+  disabled: boolean;
+  icon: React.ReactNode;
+  title: string;
+  subtitle: string;
+}
+
+function MethodOption({ active, onClick, disabled, icon, title, subtitle }: MethodOptionProps) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      onClick={onClick}
+      disabled={disabled}
+      className="btn-press"
+      style={{
+        display: "flex",
+        gap: 10,
+        alignItems: "center",
+        padding: "10px 12px",
+        background: active ? "var(--accent-soft)" : "var(--surface-2)",
+        border: `1px solid ${active ? "var(--accent)" : "var(--border)"}`,
+        borderRadius: 8,
+        cursor: disabled ? "not-allowed" : "pointer",
+        textAlign: "left",
+        opacity: disabled ? 0.6 : 1,
+        transition: "background 150ms ease, border-color 150ms ease",
+        color: "var(--text-1)",
+      }}
+    >
+      <div
+        style={{
+          width: 28,
+          height: 28,
+          borderRadius: 6,
+          background: active ? "var(--accent)" : "var(--surface-1)",
+          color: active ? "var(--surface-1)" : "var(--text-2)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+        }}
+      >
+        {icon}
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: active ? "var(--accent)" : "var(--text-1)" }}>
+          {title}
+        </div>
+        <div style={{ fontSize: 11, color: "var(--text-3)", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {subtitle}
+        </div>
+      </div>
+    </button>
   );
 }
 
